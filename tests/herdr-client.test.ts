@@ -253,6 +253,26 @@ test("wait uses Herdr output waiting rather than GWC polling", async () => {
   expect(waited).toMatchObject({ pane_id: "wA:p1", revision: 8, matched_line: "READY" });
 });
 
+test("Herdr output wait timeout is unknown and never implies cleanup", async () => {
+  const methods: string[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      methods.push(request.method);
+      return { id: request.id, error: { code: "timeout", message: "timed out waiting for output match" } };
+    },
+  });
+  await expect(client.waitPane("test", {
+    paneId: "wA:p1",
+    source: "recent",
+    matchType: "substring",
+    match: "NEVER",
+    timeoutMs: 25,
+  })).rejects.toMatchObject({ health: "unknown", code: "timeout" });
+  expect(methods).toEqual(["pane.wait_for_output"]);
+  expect(methods.some(method => /close|remove|stop|kill/.test(method))).toBe(false);
+});
+
 test("pane status reports not-found explicitly for invalid ids", async () => {
   const client = new HerdrClient({
     discoverSessions: async () => [session],

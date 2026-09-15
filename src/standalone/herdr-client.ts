@@ -68,7 +68,9 @@ function normalizePath(path: string): string {
 }
 
 function apiErrorHealth(code: string): HerdrHealth {
-  return code.includes("not_found") ? "not_found" : "failed";
+  if (code.includes("not_found")) return "not_found";
+  if (code === "timeout") return "unknown";
+  return "failed";
 }
 
 export async function requestHerdrSocket(
