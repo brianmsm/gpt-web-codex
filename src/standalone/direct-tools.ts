@@ -208,11 +208,16 @@ function resolveNewMutationTarget(path: string, workspace: string, mode: LunaSan
   return resolve(canonicalParent, basename(scoped));
 }
 
+function assertValidMutationText(text: string, path: string): void {
+  if (text.includes("\0")) throw new Error(`File is not UTF-8 text: ${path}`);
+}
+
 function decodeTextFile(bytes: Buffer, path: string): string {
   const text = bytes.toString("utf8");
-  if (!Buffer.from(text, "utf8").equals(bytes) || text.includes("\0")) {
+  if (!Buffer.from(text, "utf8").equals(bytes)) {
     throw new Error(`File is not UTF-8 text: ${path}`);
   }
+  assertValidMutationText(text, path);
   return text;
 }
 
@@ -735,6 +740,7 @@ export class DirectToolService {
     if (pathEntryExists(requestedTarget)) {
       const source = readMutationTarget(path, workspace, mode);
       reserveMutationTransactionBytes(0, source.path, source.bytes.length, updatedBytes, "File write");
+      assertValidMutationText(content, source.path);
       const updated = Buffer.from(content, "utf8");
       commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write");
       return { path: requestedTarget, bytes: updated.length };
@@ -742,6 +748,7 @@ export class DirectToolService {
 
     const target = resolveNewMutationTarget(path, workspace, mode);
     reserveMutationTransactionBytes(0, target, 0, updatedBytes, "File write");
+    assertValidMutationText(content, target);
     const updated = Buffer.from(content, "utf8");
     commitNewTextMutation(target, updated, "File write");
     return { path: requestedTarget, bytes: updated.length };
@@ -791,6 +798,7 @@ export class DirectToolService {
     );
 
     const updatedText = source.text.replaceAll(oldText, () => newText);
+    assertValidMutationText(updatedText, source.path);
     const updated = Buffer.from(updatedText, "utf8");
     reserveMutationTransactionBytes(0, source.path, source.bytes.length, updated.length, "File edit");
     commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
@@ -818,6 +826,7 @@ export class DirectToolService {
       }
       canonicalTargets.add(source.path);
       const updatedText = applyUnifiedHunks(file.path, source.text, file.hunks);
+      assertValidMutationText(updatedText, source.path);
       const updated = Buffer.from(updatedText, "utf8");
       transactionBytes = reserveMutationTransactionBytes(
         transactionBytes, source.path, source.bytes.length, updated.length, "File patch",

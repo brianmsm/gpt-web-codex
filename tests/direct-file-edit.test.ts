@@ -107,6 +107,17 @@ test("file_edit rejects read-only, traversal, symlink escape, and non-text input
   });
 });
 
+test("file_edit rejects a result containing NUL before staging", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "nul-edit.txt");
+    writeFileSync(path, "before value after\n", "utf8");
+
+    expect(() => tools.edit("nul-edit.txt", "value", "abc\0def", workspace, "workspace-write")).toThrow("UTF-8 text");
+    expect(readFileSync(path, "utf8")).toBe("before value after\n");
+    expect(fs.readdirSync(workspace).filter(name => name.includes(".gwc-"))).toEqual([]);
+  });
+});
+
 test("file_edit preserves danger-full-access semantics outside the workspace", () => {
   withWorkspace((root, workspace, tools) => {
     const outside = join(root, "outside.txt");
@@ -297,6 +308,23 @@ test("file_apply_patch rejects traversal, symlink escape, and read-only mode", (
     );
     expect(() => tools.applyPatch(escaped, workspace, "workspace-write")).toThrow("through a link");
     expect(readFileSync(linked, "utf8")).toBe("linked\n");
+  });
+});
+
+test("file_apply_patch rejects a result containing NUL before staging", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "nul-patch.txt");
+    writeFileSync(path, "old\n", "utf8");
+
+    expect(() => tools.applyPatch(unified(
+      "--- a/nul-patch.txt",
+      "+++ b/nul-patch.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+abc\0def",
+    ), workspace, "workspace-write")).toThrow("UTF-8 text");
+    expect(readFileSync(path, "utf8")).toBe("old\n");
+    expect(fs.readdirSync(workspace).filter(name => name.includes(".gwc-"))).toEqual([]);
   });
 });
 

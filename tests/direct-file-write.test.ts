@@ -84,6 +84,20 @@ test("file_write rejects non-UTF-8 existing files instead of bypassing the text 
   });
 });
 
+test("file_write rejects NUL output for both replace and create before staging", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const existing = join(workspace, "existing.txt");
+    writeFileSync(existing, "before\n", "utf8");
+
+    expect(() => tools.write("existing.txt", "abc\0def", workspace, "workspace-write")).toThrow("UTF-8 text");
+    expect(readFileSync(existing, "utf8")).toBe("before\n");
+
+    expect(() => tools.write("new.txt", "abc\0def", workspace, "workspace-write")).toThrow("UTF-8 text");
+    expect(existsSync(join(workspace, "new.txt"))).toBe(false);
+    expect(stagingFiles(workspace)).toEqual([]);
+  });
+});
+
 test("file_write creates new Unicode files in canonical in-workspace parents", () => {
   withWorkspace((_root, workspace, tools) => {
     mkdirSync(join(workspace, "nested", "deep"), { recursive: true });
