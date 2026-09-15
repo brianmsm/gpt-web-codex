@@ -8,7 +8,9 @@ GPT Web Codex treats the ChatGPT account, launcher browser profile, tunnel crede
 - `codexluna_init` creates or restores a stable `web_session_id` and persists its explicit workspace, permission mode, model, reasoning, fast-mode, timeout, and session-policy version.
 - Luna and terminal cancellation targets only the child process tree owned by the recorded job.
 - Herdr is a separate process/PTY owner. `herdr_*` calls target an explicitly selected session and concrete IDs; GWC does not synthesize `HERDR_ENV`/`HERDR_*` context and does not terminate Herdr panes during MCP shutdown.
-- The Herdr MVP intentionally exposes no generic RPC router and no close/remove/kill/stop operation; timeouts and missing observations are not treated as proof of process death.
+- Every Herdr operation except `herdr_status` carries an explicit `workspace_path` and `permission_mode`. Scoped modes canonicalize existing paths with `realpath`, reject symlink escapes, authorize panes/workspaces against Herdr worktree metadata or pane cwd, and block all Herdr mutations in `read-only`. `danger-full-access` deliberately removes this path-scope restriction.
+- GWC performs a Herdr `ping` compatibility check before every operational request and refuses protocols other than the validated protocol 20 instead of assuming forward compatibility.
+- `herdr_pane_run` and `herdr_pane_send` are arbitrary PTY control surfaces and are annotated as destructive/open-world. The Herdr MVP still exposes no generic RPC router and no dedicated lifecycle operation such as workspace/pane close, worktree remove, kill, or stop; timeouts and missing observations are not treated as proof of process death.
 - File tools validate paths against the disclosed workspace unless full-control mode was selected.
 - MCP tools return bounded structured output; long logs remain local.
 - Luna image handoff accepts only existing supported image files and rechecks them through the job's recorded workspace and permission scope before returning bounded image data.

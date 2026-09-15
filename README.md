@@ -61,7 +61,7 @@ OpenAI Tunnel → standalone local MCP runtime
 - `file_create_directory` creates empty directories (and parent directories by default). `file_delete_directory` deletes only empty directories unless `recursive: true` is explicitly supplied; it always refuses the disclosed workspace root and link/junction targets.
 - `file_list` returns each entry's type, optional file size, and `modified_at` as an ISO 8601 timestamp.
 - `terminal_exec` runs ordinary PowerShell/sh commands and waits for bounded stdout, stderr, status, and exit code. Long-running or interactive work uses `terminal_start`, `terminal_status`, `terminal_write_stdin`, and `terminal_cancel` without rerunning the command.
-- Use `herdr_*` instead when a persistent/interactively controlled process should live in a real Herdr PTY that the user can observe in the Herdr application. The bridge uses explicit Herdr session/workspace/tab/pane IDs and never fabricates `HERDR_ENV`. See [Herdr bridge](docs/herdr.md).
+- Use `herdr_*` instead when a persistent/interactively controlled process should live in a real Herdr PTY that the user can observe in the Herdr application. The bridge uses explicit Herdr session/workspace/tab/pane IDs, requires an explicit `workspace_path`/`permission_mode` scope for operational calls, validates protocol 20 before acting, and never fabricates `HERDR_ENV`. See [Herdr bridge](docs/herdr.md).
 
 ## Linux deployment
 

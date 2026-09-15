@@ -53,6 +53,7 @@ const statePath = join(root, "mcp-state.json");
 const sourceRepo = join(root, "source");
 const worktreePath = join(root, "worker");
 const branch = `gwc-herdr-smoke-${process.pid}`;
+const herdrAccess = { workspace_path: root, permission_mode: "workspace-write" };
 mkdirSync(sourceRepo);
 execFileSync("git", ["init", "-b", "main"], { cwd: sourceRepo, stdio: "ignore" });
 execFileSync("git", ["config", "user.email", "gwc-herdr-smoke@localhost"], { cwd: sourceRepo });
@@ -70,6 +71,7 @@ try {
 
   const integration = await callTool(first, "herdr_workspace_open", {
     session,
+    ...herdrAccess,
     cwd: sourceRepo,
     label: `gwc-herdr-smoke-source-${process.pid}`,
   });
@@ -78,6 +80,7 @@ try {
 
   const opened = await callTool(first, "herdr_worktree_create", {
     session,
+    ...herdrAccess,
     source_cwd: sourceRepo,
     branch,
     base: "main",
@@ -97,9 +100,10 @@ try {
   const terminalId = stringField(pane, "terminal_id");
 
   const workerCommand = "printf 'GWC_HERDR_READY\\n'; while IFS= read -r line; do printf 'GWC_HERDR_ECHO:%s\\n' \"$line\"; [ \"$line\" = '__gwc_exit__' ] && break; done";
-  await callTool(first, "herdr_pane_run", { session, pane_id: paneId, command: workerCommand });
+  await callTool(first, "herdr_pane_run", { session, pane_id: paneId, command: workerCommand, ...herdrAccess });
   await callTool(first, "herdr_pane_wait", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     source: "recent",
     match_type: "substring",
@@ -108,19 +112,21 @@ try {
   });
   await callTool(first, "herdr_pane_send", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     text: "hello-before-restart",
     keys: ["Enter"],
   });
   await callTool(first, "herdr_pane_wait", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     source: "recent",
     match_type: "substring",
     match: "GWC_HERDR_ECHO:hello-before-restart",
     timeout_ms: 5_000,
   });
-  const beforeRestart = await callTool(first, "herdr_pane_status", { session, pane_id: paneId });
+  const beforeRestart = await callTool(first, "herdr_pane_status", { session, pane_id: paneId, ...herdrAccess });
 
   await first.close();
   first = undefined;
@@ -128,6 +134,7 @@ try {
   second = await connectClient(statePath, "gwc-herdr-smoke-after-restart");
   const resumed = await callTool(second, "herdr_pane_read", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     source: "recent",
     lines: 200,
@@ -141,28 +148,32 @@ try {
 
   await callTool(second, "herdr_pane_send", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     text: "hello-after-restart",
     keys: ["Enter"],
   });
   await callTool(second, "herdr_pane_wait", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     source: "recent",
     match_type: "substring",
     match: "GWC_HERDR_ECHO:hello-after-restart",
     timeout_ms: 5_000,
   });
-  const afterRestart = await callTool(second, "herdr_pane_status", { session, pane_id: paneId });
+  const afterRestart = await callTool(second, "herdr_pane_status", { session, pane_id: paneId, ...herdrAccess });
 
   await callTool(second, "herdr_pane_send", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     text: "__gwc_exit__",
     keys: ["Enter"],
   });
   await callTool(second, "herdr_pane_wait", {
     session,
+    ...herdrAccess,
     pane_id: paneId,
     source: "recent",
     match_type: "substring",

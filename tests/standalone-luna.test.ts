@@ -398,9 +398,19 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(listedTools.every(tool => Array.isArray(tool._meta?.securitySchemes))).toBe(true);
     const herdrRead = listedTools.find(tool => tool.name === "herdr_pane_read");
     const herdrRun = listedTools.find(tool => tool.name === "herdr_pane_run");
+    const herdrSend = listedTools.find(tool => tool.name === "herdr_pane_send");
+    const herdrWorkspaceOpen = listedTools.find(tool => tool.name === "herdr_workspace_open");
     expect(herdrRead?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
-    expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
-    expect(herdrRun?.inputSchema).toMatchObject({ properties: { session: { type: "string" }, pane_id: { type: "string" }, command: { type: "string" } } });
+    expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    expect(herdrSend?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    expect(herdrWorkspaceOpen?.annotations).toMatchObject({ idempotentHint: false });
+    expect(herdrRun?.inputSchema).toMatchObject({
+      properties: {
+        session: { type: "string" }, pane_id: { type: "string" }, command: { type: "string" },
+        workspace_path: { type: "string" }, permission_mode: { type: "string", default: "workspace-write" },
+      },
+      required: expect.arrayContaining(["session", "pane_id", "command", "workspace_path"]),
+    });
     const importTool = listedTools.find(tool => tool.name === "file_import_attachment");
     expect(importTool?._meta?.["openai/fileParams"]).toEqual(["file"]);
     expect(importTool?.inputSchema).toMatchObject({

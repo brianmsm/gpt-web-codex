@@ -20,6 +20,6 @@ The three local permission modes map explicitly to Codex sandbox flags. `workspa
 
 ## Herdr ownership boundary
 
-The Herdr bridge is not part of `DirectToolService` and does not use Luna. GWC discovers named Herdr sessions through `herdr session list --json`, then uses Herdr 0.8.2 Socket API protocol 20 directly over the selected Unix socket. It never fabricates `HERDR_ENV` or contextual `HERDR_*` variables and never chooses a target from UI focus.
+The Herdr bridge is not part of `DirectToolService` and does not use Luna. GWC discovers named Herdr sessions through `herdr session list --json`, then uses Herdr 0.8.2 Socket API protocol 20 directly over the selected Unix socket. Every operational call revalidates protocol compatibility before acting. It never fabricates `HERDR_ENV` or contextual `HERDR_*` variables and never chooses a target from UI focus. Except for `herdr_status`, each tool also carries an explicit workspace/permission scope so Herdr control cannot silently target unrelated local workspaces.
 
 A normal GWC shutdown stops only processes owned by the Luna/direct-process managers. It deliberately has no Herdr shutdown hook, so a Herdr pane can survive an MCP process restart and be resumed by its real `session`/`workspace_id`/`tab_id`/`pane_id`/`terminal_id`. See [Herdr bridge](herdr.md).

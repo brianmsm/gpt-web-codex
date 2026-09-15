@@ -50,28 +50,45 @@ GWC discovers named sessions with the machine-readable external command:
 herdr session list --json
 ```
 
-After an explicit session is selected, all workspace/tab/pane operations use Herdr's Unix Socket API directly. Herdr 0.8.2 uses newline-delimited JSON requests and responses over the session socket.
+After an explicit session is selected, all workspace/tab/pane operations use Herdr's Unix Socket API directly. Herdr 0.8.2 uses newline-delimited JSON requests and responses over the session socket. Before every operational request, GWC sends `ping` and requires protocol 20; a future incompatible protocol is refused before GWC sends the requested mutation/read call.
 
 GWC does **not** set or require `HERDR_ENV=1` and does not fabricate `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID`, or `HERDR_SOCKET_PATH`. Those variables belong to processes that were actually launched in Herdr. The bridge is an external client instead.
 
 Targets are explicit. Responses preserve the real identities returned by Herdr, including the relevant `session`, `workspace_id`, `tab_id`, `pane_id`, `terminal_id`, worktree path, and branch when Herdr supplies them. Later calls reuse those IDs rather than UI focus or "last created" state.
 
+## Access boundary
+
+Every `herdr_*` tool except `herdr_status` requires two explicit access fields:
+
+- `workspace_path`: the disclosed local scope for this Herdr operation;
+- `permission_mode`: `read-only`, `workspace-write`, or `danger-full-access`.
+
+`read-only` permits only observational Herdr operations (`read`, `wait`, `status`, plus reuse of an already-existing workspace); it cannot create a workspace/worktree/tab/pane and cannot send command/input to a pane. `workspace-write` permits mutation only after GWC proves that the target workspace/pane belongs to the disclosed scope. `danger-full-access` intentionally disables path scoping, matching the corresponding direct-tool escape hatch.
+
+For Git/worktree workspaces, authorization uses Herdr's stable `worktree.checkout_path` before pane cwd. Existing paths are canonicalized with `realpath`, so the same checkout reached through a symlink is recognized as the same workspace and symlink escapes outside `workspace_path` are rejected. For a non-Git workspace, the bridge must fall back to pane cwd and therefore uses a conservative policy when it cannot establish scope.
+
+When one disclosed scope needs to cover a source checkout and sibling linked worktrees, set `workspace_path` to their common authorized parent directory. In scoped modes, `herdr_worktree_create` also requires an explicit `path` so GWC can validate the destination before Herdr creates it; Herdr's configured default worktree directory is not guessed as authorized.
+
 ## MCP tools
 
 | Tool | Class | Input | Purpose |
 | --- | --- | --- | --- |
+| Tool | Class | Tool-specific input | Purpose |
+| --- | --- | --- | --- |
 | `herdr_status` | read | `session?` | Discover sessions and probe server/version/protocol health. |
-| `herdr_workspace_open` | mutate, idempotent | `session`, `cwd`, `label?` | Reuse the unique workspace matching an exact checkout/pane cwd or create one with `focus:false`. |
-| `herdr_worktree_create` | mutate | `session`, `source_cwd`, `branch`, `base?`, `path?`, `label?` | Create a linked Git worktree and its Herdr workspace. |
-| `herdr_tab_create` | mutate | `session`, `workspace_id`, `cwd?`, `label?` | Create an activity tab and return its root pane. |
-| `herdr_pane_split` | mutate | `session`, `target_pane_id`, `direction`, `cwd?`, `ratio?` | Create another real PTY by splitting an explicit pane. |
-| `herdr_pane_run` | mutate | `session`, `pane_id`, `command` | Send a command plus Enter atomically to an explicit pane. |
-| `herdr_pane_read` | read | `session`, `pane_id`, `source?`, `lines?`, `strip_ansi?` | Read terminal output without inferring liveness from an empty result. |
-| `herdr_pane_send` | mutate | `session`, `pane_id`, `text?`, `keys?` | Send interactive text and a bounded set of special keys. |
+| `herdr_workspace_open` | mutate/reuse | `session`, `cwd`, `label?` | Reuse the unique canonical workspace or create one when mutation is allowed. Reuse returns all panes in the active tab and never fabricates a root pane. |
+| `herdr_worktree_create` | mutate | `session`, `source_cwd`, `branch`, `base?`, `path?`, `label?` | Create a linked Git worktree and its Herdr workspace. `path` is required in scoped modes. |
+| `herdr_tab_create` | mutate | `session`, `workspace_id`, `cwd?`, `label?` | Create an activity tab after scope authorization and return its real root pane. |
+| `herdr_pane_split` | mutate | `session`, `target_pane_id`, `direction`, `cwd?`, `ratio?` | Create another real PTY by splitting an explicitly authorized pane. |
+| `herdr_pane_run` | mutate, destructive/open-world | `session`, `pane_id`, `command` | Send an arbitrary command plus Enter to an explicit pane. |
+| `herdr_pane_read` | read | `session`, `pane_id`, `source?`, `lines?`, `strip_ansi?` | Read terminal output after scope authorization. |
+| `herdr_pane_send` | mutate, destructive/open-world | `session`, `pane_id`, `text?`, `keys?` | Send interactive text/control keys to an explicit pane. |
 | `herdr_pane_wait` | read/wait | `session`, `pane_id`, `match`, `match_type?`, `source?`, `lines?`, `timeout_ms?` | Use Herdr's wait-for-output mechanism rather than GWC polling. |
 | `herdr_pane_status` | read | `session`, `pane_id` | Read pane identity plus shell/foreground-process information when available. |
 
-There is deliberately no generic `herdr_call(method,args)` tool and no destructive `close`, `remove`, `kill`, or `stop` tool in the MVP.
+All rows except `herdr_status` additionally require `workspace_path` and accept `permission_mode` (default `workspace-write`).
+
+There is deliberately no generic `herdr_call(method,args)` tool and no dedicated Herdr lifecycle tool for `close`, `remove`, `kill`, or `stop` in the MVP. This does **not** make PTY command/input tools harmless: `herdr_pane_run` can execute arbitrary shell commands and `herdr_pane_send` can submit commands or signals, so both are marked destructive/open-world in MCP annotations.
 
 The bridge distinguishes `healthy`, `failed`, `unknown`, and `not_found` where the Herdr response allows it. A transport timeout or `pane.wait_for_output` timeout maps to `unknown`, not to a dead process. Observational failures never cause cleanup.
 
@@ -103,7 +120,7 @@ Run:
 GWC_HERDR_SESSION=default bun run smoke:herdr
 ```
 
-The smoke test creates a disposable Git repository under `/tmp`, opens its source checkout as an integration workspace, asks Herdr to create a linked worktree/workspace, starts a real PTY worker, reads and writes it through MCP, closes the first MCP client, starts a fresh MCP client, and proves that the fresh process can read and write the **same pane ID**. It ends only the test worker loop; the Herdr shell/workspace is intentionally left open for visual inspection.
+The smoke test creates a disposable Git repository under one `/tmp/gwc-herdr-smoke-*` scope, passes that directory as `workspace_path`, opens its source checkout as an integration workspace, asks Herdr to create a linked worktree/workspace at an explicit in-scope path, starts a real PTY worker, reads and writes it through MCP, closes the first MCP client, starts a fresh MCP client, and proves that the fresh process can read and write the **same pane ID**. It ends only the test worker loop; the Herdr shell/workspace is intentionally left open for visual inspection.
 
 The receipt includes:
 
@@ -152,9 +169,9 @@ Do not replace a working installed launcher merely to test source changes. Valid
 
 ## Known limitations
 
-- The bridge is validated against Herdr 0.8.2 / protocol 20. A different protocol is reported unhealthy rather than guessed compatible.
+- The bridge is validated against Herdr 0.8.2 / protocol 20. Every operational call rechecks compatibility and refuses a different protocol before sending the requested operation.
 - Session discovery depends on the installed Herdr CLI's `session list --json`; runtime control after discovery goes directly to the socket.
-- `herdr_workspace_open` has robust checkout identity for Git/worktree workspaces because Herdr exposes `worktree.checkout_path`. For a non-Git workspace without worktree metadata, matching falls back to exact current pane cwd; if every pane has changed directory, opening by the original cwd may create a new workspace rather than guessing.
+- `herdr_workspace_open` canonicalizes existing paths and has robust checkout identity for Git/worktree workspaces because Herdr exposes `worktree.checkout_path`. For a non-Git workspace without worktree metadata, matching falls back to exact current pane cwd; if every pane has changed directory, opening by the original cwd may create a new workspace rather than guessing. For that reason the tool is not advertised as strictly idempotent.
 - Plain shell panes can legitimately report Herdr `agent_status="unknown"`; process information and pane existence remain separate signals.
-- The MVP does not expose destructive Herdr operations or a generic RPC escape hatch.
+- The MVP does not expose dedicated destructive Herdr lifecycle operations or a generic RPC escape hatch; arbitrary PTY command/input remains inherently capable of destructive or external effects and is annotated accordingly.
 - The Herdr 0.8.2 CLI can focus a workspace/tab by absolute ID but pane focus itself is directional, as described above.

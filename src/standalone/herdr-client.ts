@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { Socket } from "node:net";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const SUPPORTED_PROTOCOL = 20;
 
 export type HerdrHealth = "healthy" | "failed" | "unknown" | "not_found";
 
@@ -63,8 +65,14 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function normalizePath(path: string): string {
-  return resolve(path);
+function within(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+function canonicalOrResolved(path: string): string {
+  const resolved = resolve(path);
+  try { return realpathSync.native(resolved); } catch { return resolved; }
 }
 
 function apiErrorHealth(code: string): HerdrHealth {
@@ -193,6 +201,21 @@ async function discoverWithCli(executable: string): Promise<HerdrSessionInfo[]> 
   });
 }
 
+export type HerdrPermissionMode = "read-only" | "workspace-write" | "danger-full-access";
+
+export interface HerdrAccessScope {
+  workspacePath: string;
+  permissionMode: HerdrPermissionMode;
+}
+
+interface SnapshotState {
+  version?: unknown;
+  protocol?: unknown;
+  workspaces: unknown[];
+  tabs: unknown[];
+  panes: unknown[];
+}
+
 export class HerdrClient {
   private readonly discover: DiscoverSessions;
   private readonly send: SendRequest;
@@ -237,16 +260,15 @@ export class HerdrClient {
     const probed = await Promise.all(selected.map(async session => {
       if (!session.running) return { ...this.publicSession(session), health: "failed" as const, version: null, protocol: null, error: "session is not running" };
       try {
-        const result = await this.requestResult(session, "ping", {}, DEFAULT_TIMEOUT_MS);
-        if (result.type !== "pong" || typeof result.version !== "string" || typeof result.protocol !== "number") {
-          throw new HerdrClientError("Unexpected Herdr ping response", "failed", "malformed_response");
-        }
+        const pong = await this.pingSession(session);
         return {
           ...this.publicSession(session),
-          health: result.protocol === 20 ? "healthy" as const : "failed" as const,
-          version: result.version,
-          protocol: result.protocol,
-          error: result.protocol === 20 ? null : `unsupported protocol ${result.protocol}; expected 20`,
+          health: pong.protocol === SUPPORTED_PROTOCOL ? "healthy" as const : "failed" as const,
+          version: pong.version,
+          protocol: pong.protocol,
+          error: pong.protocol === SUPPORTED_PROTOCOL
+            ? null
+            : `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOL}`,
         };
       } catch (error) {
         const known = this.normalizeError(error);
@@ -267,66 +289,105 @@ export class HerdrClient {
     };
   }
 
-  async openWorkspace(sessionName: string, cwd: string, label?: string) {
-    const session = await this.requireSession(sessionName);
-    const path = normalizePath(cwd);
-    const snapshot = this.expectResult(await this.requestResult(session, "session.snapshot", {}), "session_snapshot");
-    const state = isRecord(snapshot.snapshot) ? snapshot.snapshot : null;
-    if (!state || !Array.isArray(state.workspaces) || !Array.isArray(state.panes) || !Array.isArray(state.tabs)) {
-      throw new HerdrClientError("Malformed Herdr session snapshot", "failed", "malformed_response");
+  async openWorkspace(sessionName: string, cwd: string, label: string | undefined, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    const path = this.requireExistingPathWithinScope(cwd, scope, "workspace cwd");
+    const state = await this.snapshot(session);
+    const workspaceById = new Map<string, Record<string, unknown>>();
+    for (const value of state.workspaces) {
+      if (isRecord(value) && typeof value.workspace_id === "string") workspaceById.set(value.workspace_id, value);
     }
+
     const matchingIds = new Set<string>();
-    for (const workspace of state.workspaces) {
-      if (!isRecord(workspace) || typeof workspace.workspace_id !== "string") continue;
+    for (const workspace of workspaceById.values()) {
       const worktree = isRecord(workspace.worktree) ? workspace.worktree : null;
-      if (worktree && optionalString(worktree.checkout_path) && normalizePath(worktree.checkout_path as string) === path) {
-        matchingIds.add(workspace.workspace_id);
-      }
+      const checkout = worktree ? optionalString(worktree.checkout_path) : undefined;
+      if (checkout && canonicalOrResolved(checkout) === path) matchingIds.add(workspace.workspace_id as string);
     }
     for (const pane of state.panes) {
       if (!isRecord(pane) || typeof pane.workspace_id !== "string") continue;
+      const workspace = workspaceById.get(pane.workspace_id);
+      if (workspace && isRecord(workspace.worktree)) continue;
       const paneCwd = optionalString(pane.cwd);
-      if (paneCwd && normalizePath(paneCwd) === path) matchingIds.add(pane.workspace_id);
+      if (paneCwd && canonicalOrResolved(paneCwd) === path) matchingIds.add(pane.workspace_id);
     }
     if (matchingIds.size > 1) {
       throw new HerdrClientError(`Multiple Herdr workspaces match cwd ${path}`, "failed", "ambiguous_workspace");
     }
     if (matchingIds.size === 1) {
       const workspaceId = [...matchingIds][0]!;
-      const workspace = state.workspaces.find(value => isRecord(value) && value.workspace_id === workspaceId) as Record<string, unknown> | undefined;
+      this.assertWorkspaceInScope(state, workspaceId, scope);
+      const workspace = workspaceById.get(workspaceId);
       const tab = state.tabs.find(value => isRecord(value) && value.workspace_id === workspaceId && value.tab_id === workspace?.active_tab_id) as Record<string, unknown> | undefined;
-      const pane = state.panes.find(value => isRecord(value) && value.workspace_id === workspaceId && value.tab_id === tab?.tab_id) as Record<string, unknown> | undefined;
-      return { session: session.name, socket_path: session.socketPath, created: false, cwd: path, workspace, tab: tab ?? null, root_pane: pane ?? null };
+      const panes = tab
+        ? state.panes.filter(value => isRecord(value) && value.workspace_id === workspaceId && value.tab_id === tab.tab_id) as Record<string, unknown>[]
+        : [];
+      return {
+        session: session.name,
+        socket_path: session.socketPath,
+        created: false,
+        cwd: path,
+        workspace,
+        tab: tab ?? null,
+        root_pane: null,
+        panes,
+      };
     }
 
+    this.assertMutable(scope, "Herdr workspace creation");
     const created = this.expectResult(await this.requestResult(session, "workspace.create", {
       cwd: path,
       ...(label ? { label } : {}),
       focus: false,
     }), "workspace_created");
-    return { session: session.name, socket_path: session.socketPath, created: true, cwd: path, workspace: created.workspace, tab: created.tab, root_pane: created.root_pane };
+    return {
+      session: session.name,
+      socket_path: session.socketPath,
+      created: true,
+      cwd: path,
+      workspace: created.workspace,
+      tab: created.tab,
+      root_pane: created.root_pane,
+      panes: created.root_pane ? [created.root_pane] : [],
+    };
   }
 
   async createWorktree(sessionName: string, input: {
     sourceCwd: string; branch: string; base?: string; path?: string; label?: string;
-  }) {
-    const session = await this.requireSession(sessionName);
+  }, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    this.assertMutable(scope, "Herdr worktree creation");
+    const sourceCwd = this.requireExistingPathWithinScope(input.sourceCwd, scope, "worktree source cwd");
+    if (scope.permissionMode !== "danger-full-access" && !input.path) {
+      throw new HerdrClientError(
+        "Herdr worktree creation requires an explicit path in workspace-scoped modes",
+        "failed",
+        "worktree_path_required",
+      );
+    }
+    const targetPath = input.path ? this.requireProspectivePathWithinScope(input.path, scope, "worktree path") : undefined;
     const result = this.expectResult(await this.requestResult(session, "worktree.create", {
-      cwd: normalizePath(input.sourceCwd),
+      cwd: sourceCwd,
       branch: input.branch,
       ...(input.base ? { base: input.base } : {}),
-      ...(input.path ? { path: normalizePath(input.path) } : {}),
+      ...(targetPath ? { path: targetPath } : {}),
       ...(input.label ? { label: input.label } : {}),
       focus: false,
     }, 30_000), "worktree_created");
     return { session: session.name, socket_path: session.socketPath, workspace: result.workspace, tab: result.tab, root_pane: result.root_pane, worktree: result.worktree };
   }
 
-  async createTab(sessionName: string, input: { workspaceId: string; cwd?: string; label?: string }) {
-    const session = await this.requireSession(sessionName);
+  async createTab(sessionName: string, input: { workspaceId: string; cwd?: string; label?: string }, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    this.assertMutable(scope, "Herdr tab creation");
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertWorkspaceInScope(state, input.workspaceId, scope);
+    }
+    const cwd = input.cwd ? this.requireExistingPathWithinScope(input.cwd, scope, "tab cwd") : undefined;
     const result = this.expectResult(await this.requestResult(session, "tab.create", {
       workspace_id: input.workspaceId,
-      ...(input.cwd ? { cwd: normalizePath(input.cwd) } : {}),
+      ...(cwd ? { cwd } : {}),
       ...(input.label ? { label: input.label } : {}),
       focus: false,
     }), "tab_created");
@@ -335,20 +396,31 @@ export class HerdrClient {
 
   async splitPane(sessionName: string, input: {
     targetPaneId: string; direction: "right" | "down"; cwd?: string; ratio?: number;
-  }) {
-    const session = await this.requireSession(sessionName);
+  }, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    this.assertMutable(scope, "Herdr pane creation");
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertPaneInScope(state, input.targetPaneId, scope);
+    }
+    const cwd = input.cwd ? this.requireExistingPathWithinScope(input.cwd, scope, "pane cwd") : undefined;
     const result = this.expectResult(await this.requestResult(session, "pane.split", {
       target_pane_id: input.targetPaneId,
       direction: input.direction,
-      ...(input.cwd ? { cwd: normalizePath(input.cwd) } : {}),
+      ...(cwd ? { cwd } : {}),
       ...(input.ratio !== undefined ? { ratio: input.ratio } : {}),
       focus: false,
     }), "pane_info");
     return { session: session.name, socket_path: session.socketPath, pane: result.pane };
   }
 
-  async runPane(sessionName: string, paneId: string, command: string) {
-    const session = await this.requireSession(sessionName);
+  async runPane(sessionName: string, paneId: string, command: string, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    this.assertMutable(scope, "Herdr pane command execution");
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertPaneInScope(state, paneId, scope);
+    }
     this.expectResult(await this.requestResult(session, "pane.send_input", {
       pane_id: paneId,
       text: command,
@@ -357,16 +429,25 @@ export class HerdrClient {
     return { session: session.name, socket_path: session.socketPath, pane_id: paneId, accepted: true };
   }
 
-  async sendPane(sessionName: string, paneId: string, text: string, keys: string[]) {
-    const session = await this.requireSession(sessionName);
+  async sendPane(sessionName: string, paneId: string, text: string, keys: string[], scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    this.assertMutable(scope, "Herdr pane input");
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertPaneInScope(state, paneId, scope);
+    }
     this.expectResult(await this.requestResult(session, "pane.send_input", { pane_id: paneId, text, keys }), "ok");
     return { session: session.name, socket_path: session.socketPath, pane_id: paneId, accepted: true };
   }
 
   async readPane(sessionName: string, input: {
     paneId: string; source: "visible" | "recent" | "recent_unwrapped" | "detection"; lines?: number; stripAnsi?: boolean;
-  }) {
-    const session = await this.requireSession(sessionName);
+  }, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertPaneInScope(state, input.paneId, scope);
+    }
     const result = this.expectResult(await this.requestResult(session, "pane.read", {
       pane_id: input.paneId,
       source: input.source,
@@ -380,8 +461,12 @@ export class HerdrClient {
   async waitPane(sessionName: string, input: {
     paneId: string; source: "visible" | "recent" | "recent_unwrapped" | "detection";
     matchType: "substring" | "regex"; match: string; lines?: number; timeoutMs?: number;
-  }) {
-    const session = await this.requireSession(sessionName);
+  }, scope: HerdrAccessScope) {
+    const session = await this.requireCompatibleSession(sessionName);
+    if (scope.permissionMode !== "danger-full-access") {
+      const state = await this.snapshot(session);
+      this.assertPaneInScope(state, input.paneId, scope);
+    }
     const timeoutMs = input.timeoutMs ?? 30_000;
     const result = this.expectResult(await this.requestResult(session, "pane.wait_for_output", {
       pane_id: input.paneId,
@@ -394,10 +479,14 @@ export class HerdrClient {
     return { session: session.name, socket_path: session.socketPath, pane_id: result.pane_id, revision: result.revision, matched_line: result.matched_line ?? null, read: result.read };
   }
 
-  async paneStatus(sessionName: string, paneId: string) {
+  async paneStatus(sessionName: string, paneId: string, scope: HerdrAccessScope) {
     let session: HerdrSessionInfo;
     try {
-      session = await this.requireSession(sessionName);
+      session = await this.requireCompatibleSession(sessionName);
+      if (scope.permissionMode !== "danger-full-access") {
+        const state = await this.snapshot(session);
+        this.assertPaneInScope(state, paneId, scope);
+      }
       const paneResult = this.expectResult(await this.requestResult(session, "pane.get", { pane_id: paneId }), "pane_info");
       let processInfo: unknown = null;
       let processError: { code: string; message: string } | null = null;
@@ -434,12 +523,141 @@ export class HerdrClient {
     }
   }
 
-  private async requireSession(name: string): Promise<HerdrSessionInfo> {
+  private async requireCompatibleSession(name: string): Promise<HerdrSessionInfo> {
     const sessions = await this.sessions();
     const session = sessions.find(value => value.name === name);
     if (!session) throw new HerdrClientError(`Herdr session not found: ${name}`, "not_found", "session_not_found");
     if (!session.running) throw new HerdrClientError(`Herdr session is not running: ${name}`, "failed", "session_not_running");
+    await this.probeProtocol(session);
     return session;
+  }
+
+  private async pingSession(session: HerdrSessionInfo): Promise<{ version: string; protocol: number }> {
+    const result = await this.requestResult(session, "ping", {}, DEFAULT_TIMEOUT_MS);
+    if (result.type !== "pong" || typeof result.version !== "string" || typeof result.protocol !== "number") {
+      throw new HerdrClientError("Unexpected Herdr ping response", "failed", "malformed_response");
+    }
+    return { version: result.version, protocol: result.protocol };
+  }
+
+  private async probeProtocol(session: HerdrSessionInfo): Promise<{ version: string; protocol: number }> {
+    const pong = await this.pingSession(session);
+    if (pong.protocol !== SUPPORTED_PROTOCOL) {
+      throw new HerdrClientError(
+        `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOL}`,
+        "failed",
+        "unsupported_protocol",
+      );
+    }
+    return pong;
+  }
+
+  private async snapshot(session: HerdrSessionInfo): Promise<SnapshotState> {
+    const result = this.expectResult(await this.requestResult(session, "session.snapshot", {}), "session_snapshot");
+    const state = isRecord(result.snapshot) ? result.snapshot : null;
+    if (!state || !Array.isArray(state.workspaces) || !Array.isArray(state.panes) || !Array.isArray(state.tabs)) {
+      throw new HerdrClientError("Malformed Herdr session snapshot", "failed", "malformed_response");
+    }
+    if (typeof state.protocol === "number" && state.protocol !== SUPPORTED_PROTOCOL) {
+      throw new HerdrClientError(
+        `Unsupported Herdr snapshot protocol ${state.protocol}; expected ${SUPPORTED_PROTOCOL}`,
+        "failed",
+        "unsupported_protocol",
+      );
+    }
+    return state as unknown as SnapshotState;
+  }
+
+  private assertMutable(scope: HerdrAccessScope, operation: string): void {
+    if (scope.permissionMode === "read-only") {
+      throw new HerdrClientError(`${operation} is disabled in read-only mode`, "failed", "read_only");
+    }
+  }
+
+  private scopeRoot(scope: HerdrAccessScope): string {
+    const resolved = resolve(scope.workspacePath);
+    if (scope.permissionMode === "danger-full-access") return canonicalOrResolved(resolved);
+    try {
+      return realpathSync.native(resolved);
+    } catch (cause) {
+      throw new HerdrClientError(`Disclosed Herdr workspace path does not exist: ${resolved}`, "failed", "workspace_scope_not_found", { cause });
+    }
+  }
+
+  private requireExistingPathWithinScope(path: string, scope: HerdrAccessScope, label: string): string {
+    const resolved = resolve(path);
+    if (scope.permissionMode === "danger-full-access") return canonicalOrResolved(resolved);
+    let canonical: string;
+    try {
+      canonical = realpathSync.native(resolved);
+    } catch (cause) {
+      throw new HerdrClientError(`${label} does not exist: ${resolved}`, "not_found", "path_not_found", { cause });
+    }
+    if (!within(canonical, this.scopeRoot(scope))) {
+      throw new HerdrClientError(`${label} is outside the disclosed workspace: ${canonical}`, "failed", "scope_violation");
+    }
+    return canonical;
+  }
+
+  private requireProspectivePathWithinScope(path: string, scope: HerdrAccessScope, label: string): string {
+    const target = resolve(path);
+    if (scope.permissionMode === "danger-full-access") return target;
+    const root = this.scopeRoot(scope);
+    let ancestor = target;
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) break;
+      ancestor = parent;
+    }
+    let canonicalAncestor: string;
+    try {
+      canonicalAncestor = realpathSync.native(ancestor);
+    } catch (cause) {
+      throw new HerdrClientError(`Unable to resolve ${label}: ${target}`, "failed", "path_resolution_failed", { cause });
+    }
+    if (!within(canonicalAncestor, root)) {
+      throw new HerdrClientError(`${label} resolves outside the disclosed workspace: ${target}`, "failed", "scope_violation");
+    }
+    return target;
+  }
+
+  private assertWorkspaceInScope(state: SnapshotState, workspaceId: string, scope: HerdrAccessScope): void {
+    if (scope.permissionMode === "danger-full-access") return;
+    const workspace = state.workspaces.find(value => isRecord(value) && value.workspace_id === workspaceId);
+    if (!isRecord(workspace)) throw new HerdrClientError(`Herdr workspace not found: ${workspaceId}`, "not_found", "workspace_not_found");
+    const worktree = isRecord(workspace.worktree) ? workspace.worktree : null;
+    const checkout = worktree ? optionalString(worktree.checkout_path) : undefined;
+    if (checkout) {
+      this.requireExistingPathWithinScope(checkout, scope, "Herdr workspace checkout");
+      return;
+    }
+    const paneCwds = state.panes
+      .filter(value => isRecord(value) && value.workspace_id === workspaceId)
+      .map(value => optionalString((value as Record<string, unknown>).cwd))
+      .filter((value): value is string => Boolean(value));
+    if (paneCwds.length === 0) {
+      throw new HerdrClientError(`Cannot establish a scoped path for Herdr workspace ${workspaceId}`, "failed", "workspace_scope_unknown");
+    }
+    for (const cwd of paneCwds) this.requireExistingPathWithinScope(cwd, scope, "Herdr workspace pane cwd");
+  }
+
+  private assertPaneInScope(state: SnapshotState, paneId: string, scope: HerdrAccessScope): void {
+    if (scope.permissionMode === "danger-full-access") return;
+    const pane = state.panes.find(value => isRecord(value) && value.pane_id === paneId);
+    if (!isRecord(pane)) throw new HerdrClientError(`Herdr pane not found: ${paneId}`, "not_found", "pane_not_found");
+    const workspaceId = optionalString(pane.workspace_id);
+    if (!workspaceId) throw new HerdrClientError(`Malformed Herdr pane identity: ${paneId}`, "failed", "malformed_response");
+    const workspace = state.workspaces.find(value => isRecord(value) && value.workspace_id === workspaceId);
+    if (!isRecord(workspace)) throw new HerdrClientError(`Herdr workspace not found for pane ${paneId}`, "not_found", "workspace_not_found");
+    const worktree = isRecord(workspace.worktree) ? workspace.worktree : null;
+    const checkout = worktree ? optionalString(worktree.checkout_path) : undefined;
+    if (checkout) {
+      this.requireExistingPathWithinScope(checkout, scope, "Herdr pane checkout");
+      return;
+    }
+    const cwd = optionalString(pane.cwd);
+    if (!cwd) throw new HerdrClientError(`Cannot establish a scoped cwd for Herdr pane ${paneId}`, "failed", "pane_scope_unknown");
+    this.requireExistingPathWithinScope(cwd, scope, "Herdr pane cwd");
   }
 
   private async requestResult(
