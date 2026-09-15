@@ -14,6 +14,8 @@ import {
   LEGACY_IMAGE_PREVIEW_RESOURCE_URIS,
 } from "../../standalone/image-preview";
 import { LunaJobManager } from "../../standalone/luna-jobs";
+import { HerdrClient } from "../../standalone/herdr-client";
+import { registerHerdrTools } from "../../standalone/herdr-tools";
 import {
   COMPACT_SESSION_POLICY,
   MCP_SERVER_INSTRUCTIONS,
@@ -211,9 +213,10 @@ function fileImagePreviewResult(
   };
 }
 
-export async function runChatGptMcpServer(options: { statePath?: string } = {}): Promise<void> {
+export async function runChatGptMcpServer(options: { statePath?: string; herdrClient?: HerdrClient } = {}): Promise<void> {
   const jobs = new LunaJobManager(new LunaStateStore(options.statePath));
   const direct = new DirectToolService();
+  const herdr = options.herdrClient ?? new HerdrClient();
   const imagePreviews = new ImagePreviewCache(options.statePath);
   const server = new McpServer(
     { name: "gpt-web-codex", version: VERSION },
@@ -226,6 +229,8 @@ export async function runChatGptMcpServer(options: { statePath?: string } = {}):
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+
+  registerHerdrTools(server, herdr);
 
   const registerImagePreviewResource = (name: string, uri: string) => {
     server.registerResource(name, uri, {
