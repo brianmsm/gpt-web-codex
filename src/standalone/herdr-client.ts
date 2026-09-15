@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createConnection } from "node:net";
+import { Socket } from "node:net";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -79,7 +79,7 @@ export async function requestHerdrSocket(
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<unknown> {
   return await new Promise((resolvePromise, rejectPromise) => {
-    const socket = createConnection(socketPath);
+    const socket = new Socket();
     socket.setEncoding("utf8");
     let buffer = "";
     let settled = false;
@@ -139,6 +139,7 @@ export async function requestHerdrSocket(
       "socket_unavailable",
       { cause },
     )));
+    socket.connect(socketPath);
   });
 }
 
