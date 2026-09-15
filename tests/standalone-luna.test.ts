@@ -366,7 +366,7 @@ test("direct terminal waits for output and supports stdin", async () => {
   }
 });
 
-test("standalone MCP exposes Luna and direct tools without a turn broker", async () => {
+test("standalone MCP exposes Luna direct and Herdr tools without a turn broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-"));
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -383,15 +383,24 @@ test("standalone MCP exposes Luna and direct tools without a turn broker", async
     expect(client.getInstructions()).toContain("Never claim that an image is displayed");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
+    expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
+    expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
     const listedTools = (await client.listTools()).tools;
     const names = listedTools.map(tool => tool.name).sort();
     expect(names).toEqual([
       "codexluna_cancel", "codexluna_init", "codexluna_session", "codexluna_start", "codexluna_status",
       "file_create_directory", "file_delete_directory", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_write",
+      "herdr_pane_read", "herdr_pane_run", "herdr_pane_send", "herdr_pane_split", "herdr_pane_status", "herdr_pane_wait",
+      "herdr_status", "herdr_tab_create", "herdr_workspace_open", "herdr_worktree_create",
       "terminal_cancel", "terminal_exec", "terminal_start", "terminal_status", "terminal_write_stdin",
     ]);
     expect(listedTools.every(tool => tool.outputSchema && typeof tool.outputSchema === "object")).toBe(true);
     expect(listedTools.every(tool => Array.isArray(tool._meta?.securitySchemes))).toBe(true);
+    const herdrRead = listedTools.find(tool => tool.name === "herdr_pane_read");
+    const herdrRun = listedTools.find(tool => tool.name === "herdr_pane_run");
+    expect(herdrRead?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+    expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+    expect(herdrRun?.inputSchema).toMatchObject({ properties: { session: { type: "string" }, pane_id: { type: "string" }, command: { type: "string" } } });
     const importTool = listedTools.find(tool => tool.name === "file_import_attachment");
     expect(importTool?._meta?.["openai/fileParams"]).toEqual(["file"]);
     expect(importTool?.inputSchema).toMatchObject({
