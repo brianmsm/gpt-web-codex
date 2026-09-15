@@ -7,12 +7,13 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   rmdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import sharp from "sharp";
 import type { LunaSandbox } from "./types";
 import { terminateOwnedProcessTree } from "./process-tree";
@@ -97,6 +98,356 @@ function assertExistingAncestorWithinWorkspace(target: string, workspace: string
   if (!within(resolvedAncestor, workspaceRoot)) {
     throw new Error(`Path resolves outside the disclosed workspace through a link: ${target}`);
   }
+}
+
+
+interface PreparedTextMutation {
+  path: string;
+  original: Buffer;
+  updated: Buffer;
+}
+
+interface UnifiedDiffLine {
+  kind: "context" | "remove" | "add";
+  text: string;
+  noNewline: boolean;
+}
+
+interface UnifiedDiffHunk {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: UnifiedDiffLine[];
+}
+
+interface UnifiedDiffFile {
+  path: string;
+  hunks: UnifiedDiffHunk[];
+}
+
+interface TextLine {
+  text: string;
+  newline: boolean;
+}
+
+export interface DirectFileEditResult {
+  path: string;
+  replacements: number;
+  changed: boolean;
+  bytes_before: number;
+  bytes_after: number;
+}
+
+export interface DirectFilePatchResult {
+  files_applied: number;
+  hunks_applied: number;
+  files: Array<{
+    path: string;
+    hunks: number;
+    changed: boolean;
+    bytes_before: number;
+    bytes_after: number;
+  }>;
+}
+
+function resolveExistingMutationTarget(path: string, workspace: string, mode: LunaSandbox): string {
+  const scoped = resolveScopedPath(path, workspace, mode);
+  let target: string;
+  try {
+    target = realpathSync(scoped);
+  } catch (error) {
+    throw new Error(`Text file does not exist or cannot be resolved: ${scoped}`, { cause: error });
+  }
+  if (mode !== "danger-full-access") {
+    const workspaceRoot = realpathSync(resolve(workspace));
+    if (!within(target, workspaceRoot)) {
+      throw new Error(`Path resolves outside the disclosed workspace through a link: ${scoped}`);
+    }
+  }
+  if (!statSync(target).isFile()) throw new Error(`Path is not a file: ${target}`);
+  return target;
+}
+
+function decodeTextFile(bytes: Buffer, path: string): string {
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes) || text.includes("\0")) {
+    throw new Error(`File is not UTF-8 text: ${path}`);
+  }
+  return text;
+}
+
+function readMutationTarget(path: string, workspace: string, mode: LunaSandbox): {
+  path: string;
+  bytes: Buffer;
+  text: string;
+} {
+  const target = resolveExistingMutationTarget(path, workspace, mode);
+  const bytes = readFileSync(target);
+  return { path: target, bytes, text: decodeTextFile(bytes, target) };
+}
+
+function countOccurrences(text: string, needle: string): number {
+  let count = 0;
+  let offset = 0;
+  while (offset <= text.length) {
+    const index = text.indexOf(needle, offset);
+    if (index < 0) break;
+    count += 1;
+    offset = index + needle.length;
+  }
+  return count;
+}
+
+function stagedMutationPath(path: string, label: string): string {
+  return resolve(dirname(path), `.${basename(path)}.gwc-${label}-${randomUUID()}.tmp`);
+}
+
+function commitTextMutations(plans: PreparedTextMutation[], operation: string): void {
+  const changed = plans.filter(plan => !plan.original.equals(plan.updated));
+  if (changed.length === 0) return;
+
+  for (const plan of changed) {
+    const current = readFileSync(plan.path);
+    if (!current.equals(plan.original)) {
+      throw new Error(`${operation} aborted because the file changed during validation: ${plan.path}`);
+    }
+  }
+
+  const staged = changed.map(plan => ({
+    ...plan,
+    updatedTemp: stagedMutationPath(plan.path, "updated"),
+    rollbackTemp: stagedMutationPath(plan.path, "rollback"),
+    mode: statSync(plan.path).mode & 0o777,
+  }));
+  const cleanup = (preserveRollback = new Set<string>()) => {
+    for (const plan of staged) {
+      try { rmSync(plan.updatedTemp, { force: true }); } catch {}
+      if (!preserveRollback.has(plan.rollbackTemp)) {
+        try { rmSync(plan.rollbackTemp, { force: true }); } catch {}
+      }
+    }
+  };
+
+  try {
+    for (const plan of staged) {
+      writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
+      writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
+    }
+    for (const plan of staged) {
+      const current = readFileSync(plan.path);
+      if (!current.equals(plan.original)) {
+        throw new Error(`${operation} aborted because the file changed during staging: ${plan.path}`);
+      }
+    }
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+
+  const touched: typeof staged = [];
+  try {
+    for (const plan of staged) {
+      const current = readFileSync(plan.path);
+      if (!current.equals(plan.original)) {
+        throw new Error(`${operation} aborted because the file changed before commit: ${plan.path}`);
+      }
+      renameSync(plan.updatedTemp, plan.path);
+      touched.push(plan);
+    }
+  } catch (error) {
+    const rollbackErrors: string[] = [];
+    for (const plan of touched.reverse()) {
+      try {
+        renameSync(plan.rollbackTemp, plan.path);
+      } catch (rollbackError) {
+        rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new Error(`${operation} failed and rollback was incomplete: ${rollbackErrors.join("; ")}`, { cause: error });
+    }
+    cleanup();
+    throw error;
+  }
+
+  cleanup();
+}
+
+function stripPatchSyntaxCarriage(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
+function patchHeaderPath(header: string, label: string): string {
+  const withoutTimestamp = header.split("\t", 1)[0] ?? "";
+  if (!withoutTimestamp) throw new Error(`Malformed unified diff: missing ${label} path`);
+  if (withoutTimestamp === "/dev/null") {
+    throw new Error("Unified diff file creation and deletion are not supported");
+  }
+  if (withoutTimestamp.startsWith('"')) {
+    throw new Error(`Quoted unified diff paths are not supported: ${withoutTimestamp}`);
+  }
+  if (withoutTimestamp.includes("\0")) throw new Error(`Malformed unified diff ${label} path`);
+  return withoutTimestamp;
+}
+
+function unifiedDiffPath(oldPath: string, newPath: string): string {
+  if (oldPath.startsWith("a/") && newPath.startsWith("b/") && oldPath.slice(2) === newPath.slice(2)) {
+    return oldPath.slice(2);
+  }
+  if (oldPath === newPath) return oldPath;
+  throw new Error(`Unified diff rename is not supported: ${oldPath} -> ${newPath}`);
+}
+
+function parseUnifiedDiff(patch: string): UnifiedDiffFile[] {
+  if (!patch) throw new Error("Unified diff patch is empty");
+  const lines = patch.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  const files: UnifiedDiffFile[] = [];
+  let index = 0;
+
+  const isMetadata = (line: string) => [
+    "diff --git ", "index ", "old mode ", "new mode ", "similarity index ",
+    "rename from ", "rename to ", "new file mode ", "deleted file mode ",
+  ].some(prefix => line.startsWith(prefix));
+
+  while (index < lines.length) {
+    const syntax = stripPatchSyntaxCarriage(lines[index]!);
+    if (isMetadata(syntax)) {
+      index += 1;
+      continue;
+    }
+    if (!syntax.startsWith("--- ")) {
+      throw new Error(`Malformed unified diff at line ${index + 1}: expected '---' file header`);
+    }
+    const oldPath = patchHeaderPath(syntax.slice(4), "old");
+    index += 1;
+    if (index >= lines.length) throw new Error("Malformed unified diff: missing '+++' file header");
+    const newHeader = stripPatchSyntaxCarriage(lines[index]!);
+    if (!newHeader.startsWith("+++ ")) {
+      throw new Error(`Malformed unified diff at line ${index + 1}: expected '+++' file header`);
+    }
+    const newPath = patchHeaderPath(newHeader.slice(4), "new");
+    const path = unifiedDiffPath(oldPath, newPath);
+    index += 1;
+
+    const file: UnifiedDiffFile = { path, hunks: [] };
+    while (index < lines.length) {
+      const hunkHeader = stripPatchSyntaxCarriage(lines[index]!);
+      if (hunkHeader.startsWith("--- ") || isMetadata(hunkHeader)) break;
+      const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/.exec(hunkHeader);
+      if (!match) {
+        throw new Error(`Malformed unified diff at line ${index + 1}: expected hunk header`);
+      }
+      const oldStart = Number(match[1]);
+      const oldCount = match[2] === undefined ? 1 : Number(match[2]);
+      const newStart = Number(match[3]);
+      const newCount = match[4] === undefined ? 1 : Number(match[4]);
+      index += 1;
+
+      const hunkLines: UnifiedDiffLine[] = [];
+      let oldSeen = 0;
+      let newSeen = 0;
+      while (oldSeen < oldCount || newSeen < newCount) {
+        if (index >= lines.length) throw new Error("Malformed unified diff: hunk ended before its declared line counts");
+        const raw = lines[index]!;
+        const prefix = raw[0];
+        if (prefix !== " " && prefix !== "+" && prefix !== "-") {
+          throw new Error(`Malformed unified diff at line ${index + 1}: invalid hunk line prefix`);
+        }
+        const line: UnifiedDiffLine = {
+          kind: prefix === " " ? "context" : prefix === "+" ? "add" : "remove",
+          text: raw.slice(1),
+          noNewline: false,
+        };
+        if (line.kind !== "add") oldSeen += 1;
+        if (line.kind !== "remove") newSeen += 1;
+        if (oldSeen > oldCount || newSeen > newCount) {
+          throw new Error(`Malformed unified diff at line ${index + 1}: hunk exceeds its declared line counts`);
+        }
+        hunkLines.push(line);
+        index += 1;
+        if (index < lines.length
+          && stripPatchSyntaxCarriage(lines[index]!) === "\\ No newline at end of file") {
+          line.noNewline = true;
+          index += 1;
+        }
+      }
+      if (hunkLines.length === 0) throw new Error("Malformed unified diff: empty hunks are not supported");
+      file.hunks.push({ oldStart, oldCount, newStart, newCount, lines: hunkLines });
+    }
+    if (file.hunks.length === 0) throw new Error(`Unified diff has no hunks for ${file.path}`);
+    files.push(file);
+  }
+
+  if (files.length === 0) throw new Error("Unified diff patch contains no file changes");
+  const paths = new Set<string>();
+  for (const file of files) {
+    if (paths.has(file.path)) throw new Error(`Unified diff contains duplicate file sections: ${file.path}`);
+    paths.add(file.path);
+  }
+  return files;
+}
+
+function splitTextLines(text: string): TextLine[] {
+  if (!text) return [];
+  const parts = text.split("\n");
+  const endsWithNewline = text.endsWith("\n");
+  if (endsWithNewline) parts.pop();
+  return parts.map((part, index) => ({
+    text: part,
+    newline: endsWithNewline || index < parts.length - 1,
+  }));
+}
+
+function joinTextLines(lines: TextLine[]): string {
+  return lines.map(line => `${line.text}${line.newline ? "\n" : ""}`).join("");
+}
+
+function applyUnifiedHunks(path: string, text: string, hunks: UnifiedDiffHunk[]): string {
+  const original = splitTextLines(text);
+  const output: TextLine[] = [];
+  let cursor = 0;
+
+  for (const [hunkIndex, hunk] of hunks.entries()) {
+    const startIndex = hunk.oldCount === 0 ? hunk.oldStart : hunk.oldStart - 1;
+    if (startIndex < 0 || startIndex > original.length) {
+      throw new Error(`Hunk ${hunkIndex + 1} for ${path} starts outside the file`);
+    }
+    if (startIndex < cursor) {
+      throw new Error(`Hunk ${hunkIndex + 1} for ${path} overlaps or is out of order`);
+    }
+    output.push(...original.slice(cursor, startIndex));
+    const expectedNewStart = hunk.newCount === 0 ? output.length : output.length + 1;
+    if (hunk.newStart !== expectedNewStart) {
+      throw new Error(`Hunk ${hunkIndex + 1} for ${path} has inconsistent new-file line number: expected ${expectedNewStart}, got ${hunk.newStart}`);
+    }
+
+    let position = startIndex;
+    for (const line of hunk.lines) {
+      if (line.kind === "add") {
+        output.push({ text: line.text, newline: !line.noNewline });
+        continue;
+      }
+      const current = original[position];
+      if (!current || current.text !== line.text) {
+        throw new Error(`Hunk ${hunkIndex + 1} context mismatch for ${path} at old line ${position + 1}`);
+      }
+      if (line.noNewline && current.newline) {
+        throw new Error(`Hunk ${hunkIndex + 1} expected no newline at end of ${path}`);
+      }
+      if (line.kind === "context") output.push(current);
+      position += 1;
+    }
+    cursor = position;
+  }
+
+  output.push(...original.slice(cursor));
+  const prematureNoNewline = output.findIndex((line, index) => !line.newline && index < output.length - 1);
+  if (prematureNoNewline >= 0) {
+    throw new Error(`Unified diff creates an invalid missing newline before the end of ${path}`);
+  }
+  return joinTextLines(output);
 }
 
 export class DirectToolService {
@@ -236,6 +587,76 @@ export class DirectToolService {
     const target = resolveScopedPath(path, workspace, mode);
     writeFileSync(target, content, "utf8");
     return { path: target, bytes: Buffer.byteLength(content) };
+  }
+
+  edit(
+    path: string,
+    oldText: string,
+    newText: string,
+    workspace: string,
+    mode: LunaSandbox,
+    expectedOccurrences?: number,
+  ): DirectFileEditResult {
+    assertWritableMode(mode, "File editing");
+    if (!oldText) throw new Error("old_text must not be empty");
+    if (expectedOccurrences !== undefined && (!Number.isInteger(expectedOccurrences) || expectedOccurrences < 1)) {
+      throw new Error("expected_occurrences must be a positive integer when provided");
+    }
+
+    const source = readMutationTarget(path, workspace, mode);
+    const occurrences = countOccurrences(source.text, oldText);
+    const expected = expectedOccurrences ?? 1;
+    if (occurrences !== expected) {
+      if (occurrences === 0) throw new Error(`old_text was not found in ${source.path}`);
+      if (expectedOccurrences === undefined) {
+        throw new Error(`old_text is ambiguous in ${source.path}: found ${occurrences} occurrences; provide expected_occurrences to replace all exact matches`);
+      }
+      throw new Error(`Expected ${expected} occurrences of old_text in ${source.path}, found ${occurrences}`);
+    }
+
+    const updatedText = source.text.split(oldText).join(newText);
+    const updated = Buffer.from(updatedText, "utf8");
+    commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
+    return {
+      path: source.path,
+      replacements: occurrences,
+      changed: !source.bytes.equals(updated),
+      bytes_before: source.bytes.length,
+      bytes_after: updated.length,
+    };
+  }
+
+  applyPatch(patch: string, workspace: string, mode: LunaSandbox): DirectFilePatchResult {
+    assertWritableMode(mode, "File patching");
+    const parsed = parseUnifiedDiff(patch);
+    const canonicalTargets = new Set<string>();
+    const plans: PreparedTextMutation[] = [];
+    const files: DirectFilePatchResult["files"] = [];
+
+    for (const file of parsed) {
+      const source = readMutationTarget(file.path, workspace, mode);
+      if (canonicalTargets.has(source.path)) {
+        throw new Error(`Unified diff resolves multiple file sections to the same file: ${source.path}`);
+      }
+      canonicalTargets.add(source.path);
+      const updatedText = applyUnifiedHunks(file.path, source.text, file.hunks);
+      const updated = Buffer.from(updatedText, "utf8");
+      plans.push({ path: source.path, original: source.bytes, updated });
+      files.push({
+        path: source.path,
+        hunks: file.hunks.length,
+        changed: !source.bytes.equals(updated),
+        bytes_before: source.bytes.length,
+        bytes_after: updated.length,
+      });
+    }
+
+    commitTextMutations(plans, "File patch");
+    return {
+      files_applied: files.length,
+      hunks_applied: files.reduce((sum, file) => sum + file.hunks, 0),
+      files,
+    };
   }
 
   createDirectory(path: string, workspace: string, mode: LunaSandbox, recursive = true): {
