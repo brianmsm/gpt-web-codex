@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -220,12 +221,10 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
     rollbackTemp: stagedMutationPath(plan.path, "rollback"),
     mode: statSync(plan.path).mode & 0o777,
   }));
-  const cleanup = (preserveRollback = new Set<string>()) => {
+  const cleanup = () => {
     for (const plan of staged) {
       try { rmSync(plan.updatedTemp, { force: true }); } catch {}
-      if (!preserveRollback.has(plan.rollbackTemp)) {
-        try { rmSync(plan.rollbackTemp, { force: true }); } catch {}
-      }
+      try { rmSync(plan.rollbackTemp, { force: true }); } catch {}
     }
   };
 
@@ -233,6 +232,8 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
     for (const plan of staged) {
       writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
       writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
+      chmodSync(plan.updatedTemp, plan.mode);
+      chmodSync(plan.rollbackTemp, plan.mode);
     }
     for (const plan of staged) {
       const current = readFileSync(plan.path);
@@ -306,14 +307,20 @@ function parseUnifiedDiff(patch: string): UnifiedDiffFile[] {
   const files: UnifiedDiffFile[] = [];
   let index = 0;
 
-  const isMetadata = (line: string) => [
-    "diff --git ", "index ", "old mode ", "new mode ", "similarity index ",
-    "rename from ", "rename to ", "new file mode ", "deleted file mode ",
-  ].some(prefix => line.startsWith(prefix));
+  const isSupportedMetadata = (line: string) => ["diff --git ", "index "].some(prefix => line.startsWith(prefix));
+  const unsupportedMetadata = [
+    "old mode ", "new mode ", "similarity index ", "rename from ", "rename to ",
+    "new file mode ", "deleted file mode ",
+  ];
+  const rejectUnsupportedMetadata = (line: string): void => {
+    const prefix = unsupportedMetadata.find(candidate => line.startsWith(candidate));
+    if (prefix) throw new Error(`Unified diff metadata is not supported: ${prefix.trim()}`);
+  };
 
   while (index < lines.length) {
     const syntax = stripPatchSyntaxCarriage(lines[index]!);
-    if (isMetadata(syntax)) {
+    rejectUnsupportedMetadata(syntax);
+    if (isSupportedMetadata(syntax)) {
       index += 1;
       continue;
     }
@@ -334,7 +341,8 @@ function parseUnifiedDiff(patch: string): UnifiedDiffFile[] {
     const file: UnifiedDiffFile = { path, hunks: [] };
     while (index < lines.length) {
       const hunkHeader = stripPatchSyntaxCarriage(lines[index]!);
-      if (hunkHeader.startsWith("--- ") || isMetadata(hunkHeader)) break;
+      rejectUnsupportedMetadata(hunkHeader);
+      if (hunkHeader.startsWith("--- ") || isSupportedMetadata(hunkHeader)) break;
       const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/.exec(hunkHeader);
       if (!match) {
         throw new Error(`Malformed unified diff at line ${index + 1}: expected hunk header`);

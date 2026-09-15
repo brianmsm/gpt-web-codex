@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DirectToolService } from "../src/standalone/direct-tools";
@@ -380,5 +380,36 @@ test("file_apply_patch accepts ordinary git unified-diff metadata without weaken
       "+new",
     ), workspace, "workspace-write");
     expect(readFileSync(path, "utf8")).toBe("new\n");
+  });
+});
+
+
+test("direct text mutations preserve existing POSIX permission bits", () => {
+  if (process.platform === "win32") return;
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "mode.txt");
+    writeFileSync(path, "before\n", "utf8");
+    chmodSync(path, 0o764);
+    tools.edit("mode.txt", "before", "after", workspace, "workspace-write");
+    expect(statSync(path).mode & 0o777).toBe(0o764);
+  });
+});
+
+test("file_apply_patch rejects unsupported structural metadata instead of ignoring it", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "mode.txt");
+    writeFileSync(path, "old\n", "utf8");
+    const patch = unified(
+      "diff --git a/mode.txt b/mode.txt",
+      "old mode 100644",
+      "new mode 100755",
+      "--- a/mode.txt",
+      "+++ b/mode.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    );
+    expect(() => tools.applyPatch(patch, workspace, "workspace-write")).toThrow("metadata is not supported");
+    expect(readFileSync(path, "utf8")).toBe("old\n");
   });
 });

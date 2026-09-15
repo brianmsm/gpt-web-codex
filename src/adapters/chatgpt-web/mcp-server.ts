@@ -613,7 +613,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_apply_patch", {
     title: "Apply a strict unified diff to local text files",
-    description: "Apply a strict unified diff to one or more existing UTF-8 text files. File creation, deletion, rename, quoted paths, fuzzy offsets, and context relocation are not supported. Every file and hunk is parsed and validated before writes begin; workspace-write rejects path traversal and symlink escapes. Disabled in read-only mode.",
+    description: "Apply a strict unified diff to one or more existing UTF-8 text files. File creation, deletion, rename, mode changes, quoted paths, fuzzy offsets, and context relocation are not supported. Every file and hunk is parsed and validated before writes begin; workspace-write rejects path traversal and symlink escapes. Disabled in read-only mode.",
     inputSchema: z.object({
       patch: z.string().min(1).max(5_000_000),
       workspace_path: z.string().min(1),
