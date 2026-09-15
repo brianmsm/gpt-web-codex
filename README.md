@@ -12,7 +12,7 @@ GPT Web Codex is a pure MCP launcher. A normal ChatGPT Web conversation is the p
 
 - Uses ChatGPT in the user's normal browser; the launcher never embeds or automates ChatGPT.
 - Binds each stable ChatGPT conversation URL to one persistent Luna session.
-- Exposes asynchronous `codexluna_*` tools plus direct file and terminal tools over MCP.
+- Exposes asynchronous `codexluna_*` tools, direct file/terminal tools, and an optional explicit Herdr 0.8.2 bridge over MCP.
 - Serializes Luna work inside one web session while allowing different web sessions to run independently.
 - Supports `read-only`, `workspace-write`, and `danger-full-access` execution modes.
 - Keeps long-running jobs alive when the ChatGPT reply finishes; jobs can be polled or cancelled explicitly.
@@ -35,10 +35,11 @@ OpenAI Tunnel → standalone local MCP runtime
         ├─ codexluna_init/start/status/cancel/session
         ├─ file_import_attachment / file_read / preview / list / search / write
         ├─ file_create_directory / file_delete_directory
-        └─ terminal_exec / start / status / write_stdin / cancel
-                 │
-                 ▼
-          codex exec --json (Luna)
+        ├─ terminal_exec / start / status / write_stdin / cancel
+        └─ herdr_status / workspace / worktree / tab / pane tools
+                 │                              │
+                 ▼                              ▼
+          codex exec --json (Luna)       Herdr Socket API → real PTYs
 ```
 
 ## Image previews and page refreshes
@@ -60,6 +61,7 @@ OpenAI Tunnel → standalone local MCP runtime
 - `file_create_directory` creates empty directories (and parent directories by default). `file_delete_directory` deletes only empty directories unless `recursive: true` is explicitly supplied; it always refuses the disclosed workspace root and link/junction targets.
 - `file_list` returns each entry's type, optional file size, and `modified_at` as an ISO 8601 timestamp.
 - `terminal_exec` runs ordinary PowerShell/sh commands and waits for bounded stdout, stderr, status, and exit code. Long-running or interactive work uses `terminal_start`, `terminal_status`, `terminal_write_stdin`, and `terminal_cancel` without rerunning the command.
+- Use `herdr_*` instead when a persistent/interactively controlled process should live in a real Herdr PTY that the user can observe in the Herdr application. The bridge uses explicit Herdr session/workspace/tab/pane IDs and never fabricates `HERDR_ENV`. See [Herdr bridge](docs/herdr.md).
 
 ## Linux deployment
 
