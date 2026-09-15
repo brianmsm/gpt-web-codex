@@ -383,13 +383,14 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("Never claim that an image is displayed");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
+    expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
     expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
     const listedTools = (await client.listTools()).tools;
     const names = listedTools.map(tool => tool.name).sort();
     expect(names).toEqual([
       "codexluna_cancel", "codexluna_init", "codexluna_session", "codexluna_start", "codexluna_status",
-      "file_create_directory", "file_delete_directory", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_write",
+      "file_apply_patch", "file_create_directory", "file_delete_directory", "file_edit", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_write",
       "herdr_pane_read", "herdr_pane_run", "herdr_pane_send", "herdr_pane_split", "herdr_pane_status", "herdr_pane_wait",
       "herdr_status", "herdr_tab_create", "herdr_workspace_open", "herdr_worktree_create",
       "terminal_cancel", "terminal_exec", "terminal_start", "terminal_status", "terminal_write_stdin",
@@ -417,6 +418,63 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
       properties: { file: { type: "object" }, destination: { type: "string" }, workspace_path: { type: "string" } },
     });
     expect(importTool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    const editTool = listedTools.find(tool => tool.name === "file_edit");
+    const patchTool = listedTools.find(tool => tool.name === "file_apply_patch");
+    expect(editTool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+    expect(patchTool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+    expect(editTool?.inputSchema).toMatchObject({
+      type: "object", additionalProperties: false,
+      properties: {
+        path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" },
+        expected_occurrences: { type: "integer" }, workspace_path: { type: "string" },
+        permission_mode: { type: "string", default: "workspace-write" },
+      },
+      required: expect.arrayContaining(["path", "old_text", "new_text", "workspace_path"]),
+    });
+    expect(patchTool?.inputSchema).toMatchObject({
+      type: "object", additionalProperties: false,
+      properties: {
+        patch: { type: "string" }, workspace_path: { type: "string" },
+        permission_mode: { type: "string", default: "workspace-write" },
+      },
+      required: expect.arrayContaining(["patch", "workspace_path"]),
+    });
+
+    writeFileSync(join(root, "mcp-edit.txt"), "alpha beta\n", "utf8");
+    const edited = await client.callTool({
+      name: "file_edit",
+      arguments: {
+        path: "mcp-edit.txt", old_text: "beta", new_text: "BETA",
+        workspace_path: root, permission_mode: "workspace-write",
+      },
+    });
+    expect(edited.isError).not.toBe(true);
+    expect(edited.structuredContent).toMatchObject({ replacements: 1, changed: true });
+    expect(readFileSync(join(root, "mcp-edit.txt"), "utf8")).toBe("alpha BETA\n");
+
+    const patched = await client.callTool({
+      name: "file_apply_patch",
+      arguments: {
+        patch: [
+          "--- a/mcp-edit.txt", "+++ b/mcp-edit.txt", "@@ -1 +1 @@",
+          "-alpha BETA", "+alpha PATCHED", "",
+        ].join("\n"),
+        workspace_path: root, permission_mode: "workspace-write",
+      },
+    });
+    expect(patched.isError).not.toBe(true);
+    expect(patched.structuredContent).toMatchObject({ files_applied: 1, hunks_applied: 1 });
+    expect(readFileSync(join(root, "mcp-edit.txt"), "utf8")).toBe("alpha PATCHED\n");
+
+    const readOnlyEdit = await client.callTool({
+      name: "file_edit",
+      arguments: {
+        path: "mcp-edit.txt", old_text: "PATCHED", new_text: "blocked",
+        workspace_path: root, permission_mode: "read-only",
+      },
+    });
+    expect(readOnlyEdit.isError).toBe(true);
+    expect(readFileSync(join(root, "mcp-edit.txt"), "utf8")).toBe("alpha PATCHED\n");
     const executedTerminal = await client.callTool({
       name: "terminal_exec",
       arguments: {
