@@ -4,6 +4,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -86,6 +87,16 @@ export function resolveScopedPath(path: string, workspace: string, mode: LunaSan
 
 function assertWritableMode(mode: LunaSandbox, operation: string): void {
   if (mode === "read-only") throw new Error(`${operation} is disabled in read-only mode`);
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function assertExistingAncestorWithinWorkspace(target: string, workspace: string, mode: LunaSandbox): void {
@@ -172,6 +183,31 @@ function resolveExistingMutationTarget(path: string, workspace: string, mode: Lu
   return target;
 }
 
+function resolveNewMutationTarget(path: string, workspace: string, mode: LunaSandbox): string {
+  const scoped = resolveScopedPath(path, workspace, mode);
+  if (pathEntryExists(scoped)) {
+    throw new Error(`Text file already exists and cannot use the secure create path: ${scoped}`);
+  }
+
+  const parent = dirname(scoped);
+  let canonicalParent: string;
+  try {
+    canonicalParent = realpathSync(parent);
+  } catch (error) {
+    throw new Error(`Parent directory does not exist or cannot be resolved: ${parent}`, { cause: error });
+  }
+  if (!statSync(canonicalParent).isDirectory()) {
+    throw new Error(`Parent path is not a directory: ${canonicalParent}`);
+  }
+  if (mode !== "danger-full-access") {
+    const workspaceRoot = realpathSync(resolve(workspace));
+    if (!within(canonicalParent, workspaceRoot)) {
+      throw new Error(`Path resolves outside the disclosed workspace through a link: ${scoped}`);
+    }
+  }
+  return resolve(canonicalParent, basename(scoped));
+}
+
 function decodeTextFile(bytes: Buffer, path: string): string {
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes) || text.includes("\0")) {
@@ -238,10 +274,31 @@ function stagedMutationPath(path: string, label: string): string {
   return resolve(dirname(path), `.${basename(path)}.gwc-${label}-${randomUUID()}.tmp`);
 }
 
+const activeTextMutationPaths = new Set<string>();
+
+function withTextMutationLocks<T>(paths: string[], operation: string, run: () => T): T {
+  const canonicalPaths = [...new Set(paths)].sort();
+  const conflict = canonicalPaths.find(path => activeTextMutationPaths.has(path));
+  if (conflict) {
+    throw new Error(`${operation} aborted because another direct text mutation is in progress: ${conflict}`);
+  }
+  for (const path of canonicalPaths) activeTextMutationPaths.add(path);
+  try {
+    return run();
+  } finally {
+    for (const path of canonicalPaths) activeTextMutationPaths.delete(path);
+  }
+}
+
 function commitTextMutations(plans: PreparedTextMutation[], operation: string): void {
   const changed = plans.filter(plan => !plan.original.equals(plan.updated));
   if (changed.length === 0) return;
+  withTextMutationLocks(changed.map(plan => plan.path), operation, () => {
+    commitLockedTextMutations(changed, operation);
+  });
+}
 
+function commitLockedTextMutations(changed: PreparedTextMutation[], operation: string): void {
   for (const plan of changed) {
     const current = readMutationBytes(plan.path);
     if (!current.equals(plan.original)) {
@@ -325,6 +382,31 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
   }
 
   cleanup();
+}
+
+function commitNewTextMutation(path: string, updated: Buffer, operation: string): void {
+  withTextMutationLocks([path], operation, () => {
+    if (pathEntryExists(path)) {
+      throw new Error(`${operation} aborted because the target appeared before creation: ${path}`);
+    }
+    const updatedTemp = stagedMutationPath(path, "updated");
+    try {
+      writeFileSync(updatedTemp, updated, { flag: "wx" });
+      if (pathEntryExists(path)) {
+        throw new Error(`${operation} aborted because the target appeared during staging: ${path}`);
+      }
+      try {
+        linkSync(updatedTemp, path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(`${operation} aborted because the target appeared before publication: ${path}`, { cause: error });
+        }
+        throw error;
+      }
+    } finally {
+      try { rmSync(updatedTemp, { force: true }); } catch {}
+    }
+  });
 }
 
 function stripPatchSyntaxCarriage(line: string): string {
@@ -645,10 +727,24 @@ export class DirectToolService {
   }
 
   write(path: string, content: string, workspace: string, mode: LunaSandbox): { path: string; bytes: number } {
-    if (mode === "read-only") throw new Error("File writes are disabled in read-only mode");
-    const target = resolveScopedPath(path, workspace, mode);
-    writeFileSync(target, content, "utf8");
-    return { path: target, bytes: Buffer.byteLength(content) };
+    assertWritableMode(mode, "File writing");
+    const requestedTarget = resolveScopedPath(path, workspace, mode);
+    const updatedBytes = Buffer.byteLength(content, "utf8");
+    assertMutationFileSize(updatedBytes, requestedTarget, "updated");
+
+    if (pathEntryExists(requestedTarget)) {
+      const source = readMutationTarget(path, workspace, mode);
+      reserveMutationTransactionBytes(0, source.path, source.bytes.length, updatedBytes, "File write");
+      const updated = Buffer.from(content, "utf8");
+      commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write");
+      return { path: requestedTarget, bytes: updated.length };
+    }
+
+    const target = resolveNewMutationTarget(path, workspace, mode);
+    reserveMutationTransactionBytes(0, target, 0, updatedBytes, "File write");
+    const updated = Buffer.from(content, "utf8");
+    commitNewTextMutation(target, updated, "File write");
+    return { path: requestedTarget, bytes: updated.length };
   }
 
   edit(

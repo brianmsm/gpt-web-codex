@@ -583,7 +583,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_write", {
     title: "Write a local text file",
-    description: "Write a complete text file. Disabled in read-only mode; workspace-write stays under the disclosed workspace.",
+    description: "Create or fully replace a UTF-8 text file. Content is capped at 16 MiB. Existing files use staged publication with concurrent-change checks and permission preservation; new files use no-replace publication. Disabled in read-only mode; workspace-write rejects path traversal and symlink escapes.",
     inputSchema: { path: z.string().min(1), content: z.string().max(5_000_000), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write") },
     outputSchema: { path: z.string(), bytes: z.number().int().nonnegative() },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
