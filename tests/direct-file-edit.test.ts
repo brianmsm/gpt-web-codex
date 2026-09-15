@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -322,6 +323,105 @@ test("file_apply_patch preserves CRLF and missing-final-newline semantics", () =
       "\\ No newline at end of file",
     ), workspace, "workspace-write");
     expect(readFileSync(noEol, "utf8")).toBe("new");
+  });
+});
+
+test("file_apply_patch enforces exact final-newline markers for every transition", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const cases = [
+      { name: "eol-to-eol", initial: "old\n", oldNoNewline: false, newNoNewline: false, expected: "new\n" },
+      { name: "no-eol-to-no-eol", initial: "old", oldNoNewline: true, newNoNewline: true, expected: "new" },
+      { name: "no-eol-to-eol", initial: "old", oldNoNewline: true, newNoNewline: false, expected: "new\n" },
+      { name: "eol-to-no-eol", initial: "old\n", oldNoNewline: false, newNoNewline: true, expected: "new" },
+    ];
+
+    for (const transition of cases) {
+      const relative = `${transition.name}.txt`;
+      const path = join(workspace, relative);
+      writeFileSync(path, transition.initial, "utf8");
+      const lines = [
+        `--- a/${relative}`,
+        `+++ b/${relative}`,
+        "@@ -1 +1 @@",
+        "-old",
+      ];
+      if (transition.oldNoNewline) lines.push("\\ No newline at end of file");
+      lines.push("+new");
+      if (transition.newNoNewline) lines.push("\\ No newline at end of file");
+
+      tools.applyPatch(unified(...lines), workspace, "workspace-write");
+      expect(readFileSync(path, "utf8")).toBe(transition.expected);
+    }
+  });
+});
+
+test("file_apply_patch rejects either direction of stale final-newline context", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const missing = join(workspace, "missing-eol.txt");
+    writeFileSync(missing, "old", "utf8");
+    expect(() => tools.applyPatch(unified(
+      "--- a/missing-eol.txt",
+      "+++ b/missing-eol.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ), workspace, "workspace-write")).toThrow("patch expects a terminating newline");
+    expect(readFileSync(missing, "utf8")).toBe("old");
+
+    const present = join(workspace, "present-eol.txt");
+    writeFileSync(present, "old\n", "utf8");
+    expect(() => tools.applyPatch(unified(
+      "--- a/present-eol.txt",
+      "+++ b/present-eol.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "\\ No newline at end of file",
+      "+new",
+    ), workspace, "workspace-write")).toThrow("patch expects no terminating newline");
+    expect(readFileSync(present, "utf8")).toBe("old\n");
+  });
+});
+
+test("file_apply_patch preserves a concurrent edit when rollback follows a partial commit", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const first = join(workspace, "first-race.txt");
+    const second = join(workspace, "second-race.txt");
+    writeFileSync(first, "first\n", "utf8");
+    writeFileSync(second, "second\n", "utf8");
+
+    const originalRename = fs.renameSync;
+    let injectedConcurrentChange = false;
+    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+      originalRename(oldPath, newPath);
+      if (!injectedConcurrentChange
+        && String(newPath) === first
+        && String(oldPath).includes(".gwc-updated-")) {
+        injectedConcurrentChange = true;
+        writeFileSync(first, "external-first\n", "utf8");
+        writeFileSync(second, "external-second\n", "utf8");
+      }
+    }) as typeof fs.renameSync);
+
+    try {
+      expect(() => tools.applyPatch(unified(
+        "--- a/first-race.txt",
+        "+++ b/first-race.txt",
+        "@@ -1 +1 @@",
+        "-first",
+        "+FIRST",
+        "--- a/second-race.txt",
+        "+++ b/second-race.txt",
+        "@@ -1 +1 @@",
+        "-second",
+        "+SECOND",
+      ), workspace, "workspace-write")).toThrow("rollback was incomplete");
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(injectedConcurrentChange).toBe(true);
+    expect(readFileSync(first, "utf8")).toBe("external-first\n");
+    expect(readFileSync(second, "utf8")).toBe("external-second\n");
   });
 });
 

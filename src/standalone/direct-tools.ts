@@ -260,6 +260,11 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
     const rollbackErrors: string[] = [];
     for (const plan of touched.reverse()) {
       try {
+        const current = readFileSync(plan.path);
+        if (!current.equals(plan.updated)) {
+          rollbackErrors.push(`${plan.path}: file changed after commit; refusing to overwrite concurrent changes`);
+          continue;
+        }
         renameSync(plan.rollbackTemp, plan.path);
       } catch (rollbackError) {
         rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
@@ -441,8 +446,10 @@ function applyUnifiedHunks(path: string, text: string, hunks: UnifiedDiffHunk[])
       if (!current || current.text !== line.text) {
         throw new Error(`Hunk ${hunkIndex + 1} context mismatch for ${path} at old line ${position + 1}`);
       }
-      if (line.noNewline && current.newline) {
-        throw new Error(`Hunk ${hunkIndex + 1} expected no newline at end of ${path}`);
+      const expectedNewline = !line.noNewline;
+      if (current.newline !== expectedNewline) {
+        const expectation = expectedNewline ? "a terminating newline" : "no terminating newline";
+        throw new Error(`Hunk ${hunkIndex + 1} newline mismatch for ${path} at old line ${position + 1}: patch expects ${expectation}`);
       }
       if (line.kind === "context") output.push(current);
       position += 1;
