@@ -60,19 +60,19 @@ Targets are explicit. Responses preserve the real identities returned by Herdr, 
 
 Every `herdr_*` tool except `herdr_status` requires two explicit access fields:
 
-- `workspace_path`: the disclosed local scope for this Herdr operation;
+- `workspace_path`: the absolute disclosed local scope for this Herdr operation;
 - `permission_mode`: `read-only`, `workspace-write`, or `danger-full-access`.
 
-`read-only` permits only observational Herdr operations (`read`, `wait`, `status`, plus reuse of an already-existing workspace); it cannot create a workspace/worktree/tab/pane and cannot send command/input to a pane. `workspace-write` permits mutation only after GWC proves that the target workspace/pane belongs to the disclosed scope. `danger-full-access` intentionally disables path scoping, matching the corresponding direct-tool escape hatch.
+`read-only` permits only observational Herdr operations (`read`, `wait`, `status`, plus reuse of an already-existing workspace); it cannot create a workspace/worktree/tab/pane and cannot send command/input to a pane. `workspace-write` permits mutation only after GWC proves that the target workspace/pane belongs to the disclosed scope. `danger-full-access` intentionally disables path scoping, matching the corresponding direct-tool escape hatch. `workspace_path` itself must be absolute; every other Herdr path may be absolute or relative, and relative paths are always resolved against `workspace_path`, never against the MCP process working directory.
 
 For Git/worktree workspaces, authorization uses Herdr's stable `worktree.checkout_path` before pane cwd. Existing paths are canonicalized with `realpath`, so the same checkout reached through a symlink is recognized as the same workspace and symlink escapes outside `workspace_path` are rejected. For a non-Git workspace, the bridge must fall back to pane cwd and therefore uses a conservative policy when it cannot establish scope.
 
-When one disclosed scope needs to cover a source checkout and sibling linked worktrees, set `workspace_path` to their common authorized parent directory. In scoped modes, `herdr_worktree_create` also requires an explicit `path` so GWC can validate the destination before Herdr creates it; Herdr's configured default worktree directory is not guessed as authorized.
+When one disclosed scope needs to cover a source checkout and sibling linked worktrees, set `workspace_path` to their common authorized parent directory. In scoped modes, `herdr_worktree_create` also requires an explicit `path` so GWC can validate the destination before Herdr creates it; a relative `path` such as `worker-a` means `<workspace_path>/worker-a`. Herdr's configured default worktree directory is not guessed as authorized.
+
+This access boundary authorizes **which Herdr workspace/pane GWC may control**; it is not an operating-system sandbox for commands already authorized to run in a PTY. For example, `workspace-write` does not prevent an authorized shell command from running `cd /`, `curl`, or otherwise accessing resources permitted to that shell/user.
 
 ## MCP tools
 
-| Tool | Class | Input | Purpose |
-| --- | --- | --- | --- |
 | Tool | Class | Tool-specific input | Purpose |
 | --- | --- | --- | --- |
 | `herdr_status` | read | `session?` | Discover sessions and probe server/version/protocol health. |

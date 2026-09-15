@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
   HerdrClient,
@@ -494,6 +494,75 @@ test("workspace reuse returns every active-tab pane and never invents a root pan
   expect(opened.created).toBe(false);
   expect(opened.root_pane).toBeNull();
   expect(opened.panes.map(pane => (pane as { pane_id?: string }).pane_id)).toEqual(["wM:p1", "wM:p2"]);
+});
+
+test("relative workspace cwd resolves from workspace_path instead of the MCP process cwd", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-herdr-relative-cwd-"));
+  roots.push(root);
+  const requests: HerdrWireRequest[] = [];
+  const client = fakeClient(request => {
+    requests.push(request);
+    if (request.method === "session.snapshot") return emptySnapshot();
+    if (request.method === "workspace.create") return {
+      type: "workspace_created",
+      workspace: { workspace_id: "wRel" },
+      tab: { tab_id: "wRel:t1", workspace_id: "wRel" },
+      root_pane: { pane_id: "wRel:p1", terminal_id: "termRel", workspace_id: "wRel", tab_id: "wRel:t1" },
+    };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const opened = await client.openWorkspace("test", ".", "relative", {
+    workspacePath: root,
+    permissionMode: "workspace-write",
+  });
+  expect(opened.cwd).toBe(realpathSync.native(root));
+  expect(requests.find(request => request.method === "workspace.create")?.params.cwd).toBe(realpathSync.native(root));
+  expect(opened.cwd).not.toBe(resolve("."));
+});
+
+test("relative worktree source and destination paths resolve from workspace_path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-herdr-relative-worktree-"));
+  roots.push(root);
+  const source = join(root, "source");
+  mkdirSync(source);
+  const client = fakeClient(request => {
+    expect(request.method).toBe("worktree.create");
+    expect(request.params).toMatchObject({
+      cwd: realpathSync.native(source),
+      branch: "feat/relative",
+      path: join(root, "worker"),
+      focus: false,
+    });
+    return {
+      type: "worktree_created",
+      workspace: { workspace_id: "wRel" },
+      tab: { tab_id: "wRel:t1" },
+      root_pane: { pane_id: "wRel:p1", terminal_id: "termRel" },
+      worktree: { path: join(root, "worker"), branch: "feat/relative", open_workspace_id: "wRel" },
+    };
+  });
+  const created = await client.createWorktree("test", {
+    sourceCwd: "source",
+    branch: "feat/relative",
+    path: "worker",
+  }, { workspacePath: root, permissionMode: "workspace-write" });
+  expect(created.worktree).toMatchObject({ path: join(root, "worker") });
+});
+
+test("Herdr operational calls reject a relative workspace_path instead of using process cwd", async () => {
+  const methods: string[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      methods.push(request.method);
+      return { id: request.id, result: { type: "pong", version: "0.8.2", protocol: 20 } };
+    },
+  });
+  await expect(client.runPane("test", "wA:p1", "echo no", {
+    workspacePath: ".",
+    permissionMode: "danger-full-access",
+  })).rejects.toMatchObject({ code: "workspace_scope_not_absolute" });
+  expect(methods).toEqual([]);
 });
 
 test("workspace identity canonicalizes symlinked checkout paths", async () => {

@@ -21,7 +21,7 @@ const operationOutput = {
   error: errorDetails.optional(),
 };
 const accessScopeInput = {
-  workspace_path: localPath,
+  workspace_path: localPath.describe("Absolute disclosed local scope. Relative Herdr path arguments resolve against this path."),
   permission_mode: permissionMode.default("workspace-write"),
 };
 const sessionOutput = z.object({

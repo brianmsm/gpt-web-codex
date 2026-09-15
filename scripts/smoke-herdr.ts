@@ -72,7 +72,7 @@ try {
   const integration = await callTool(first, "herdr_workspace_open", {
     session,
     ...herdrAccess,
-    cwd: sourceRepo,
+    cwd: "source",
     label: `gwc-herdr-smoke-source-${process.pid}`,
   });
   const integrationWorkspace = asRecord(integration.workspace, "integration workspace");
@@ -81,10 +81,10 @@ try {
   const opened = await callTool(first, "herdr_worktree_create", {
     session,
     ...herdrAccess,
-    source_cwd: sourceRepo,
+    source_cwd: "source",
     branch,
     base: "main",
-    path: worktreePath,
+    path: "worker",
     label: `gwc-herdr-smoke-${process.pid}`,
   });
   const workspace = asRecord(opened.workspace, "workspace");

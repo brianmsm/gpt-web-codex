@@ -290,7 +290,7 @@ export class HerdrClient {
   }
 
   async openWorkspace(sessionName: string, cwd: string, label: string | undefined, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     const path = this.requireExistingPathWithinScope(cwd, scope, "workspace cwd");
     const state = await this.snapshot(session);
     const workspaceById = new Map<string, Record<string, unknown>>();
@@ -355,7 +355,7 @@ export class HerdrClient {
   async createWorktree(sessionName: string, input: {
     sourceCwd: string; branch: string; base?: string; path?: string; label?: string;
   }, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr worktree creation");
     const sourceCwd = this.requireExistingPathWithinScope(input.sourceCwd, scope, "worktree source cwd");
     if (scope.permissionMode !== "danger-full-access" && !input.path) {
@@ -378,7 +378,7 @@ export class HerdrClient {
   }
 
   async createTab(sessionName: string, input: { workspaceId: string; cwd?: string; label?: string }, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr tab creation");
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
@@ -397,7 +397,7 @@ export class HerdrClient {
   async splitPane(sessionName: string, input: {
     targetPaneId: string; direction: "right" | "down"; cwd?: string; ratio?: number;
   }, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr pane creation");
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
@@ -415,7 +415,7 @@ export class HerdrClient {
   }
 
   async runPane(sessionName: string, paneId: string, command: string, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr pane command execution");
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
@@ -430,7 +430,7 @@ export class HerdrClient {
   }
 
   async sendPane(sessionName: string, paneId: string, text: string, keys: string[], scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr pane input");
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
@@ -443,7 +443,7 @@ export class HerdrClient {
   async readPane(sessionName: string, input: {
     paneId: string; source: "visible" | "recent" | "recent_unwrapped" | "detection"; lines?: number; stripAnsi?: boolean;
   }, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
       this.assertPaneInScope(state, input.paneId, scope);
@@ -462,7 +462,7 @@ export class HerdrClient {
     paneId: string; source: "visible" | "recent" | "recent_unwrapped" | "detection";
     matchType: "substring" | "regex"; match: string; lines?: number; timeoutMs?: number;
   }, scope: HerdrAccessScope) {
-    const session = await this.requireCompatibleSession(sessionName);
+    const session = await this.requireOperationalSession(sessionName, scope);
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
       this.assertPaneInScope(state, input.paneId, scope);
@@ -482,7 +482,7 @@ export class HerdrClient {
   async paneStatus(sessionName: string, paneId: string, scope: HerdrAccessScope) {
     let session: HerdrSessionInfo;
     try {
-      session = await this.requireCompatibleSession(sessionName);
+      session = await this.requireOperationalSession(sessionName, scope);
       if (scope.permissionMode !== "danger-full-access") {
         const state = await this.snapshot(session);
         this.assertPaneInScope(state, paneId, scope);
@@ -521,6 +521,11 @@ export class HerdrClient {
         agent_state: "unknown",
       };
     }
+  }
+
+  private async requireOperationalSession(name: string, scope: HerdrAccessScope): Promise<HerdrSessionInfo> {
+    this.scopeBase(scope);
+    return await this.requireCompatibleSession(name);
   }
 
   private async requireCompatibleSession(name: string): Promise<HerdrSessionInfo> {
@@ -574,8 +579,23 @@ export class HerdrClient {
     }
   }
 
+  private scopeBase(scope: HerdrAccessScope): string {
+    if (!isAbsolute(scope.workspacePath)) {
+      throw new HerdrClientError(
+        `Disclosed Herdr workspace path must be absolute: ${scope.workspacePath}`,
+        "failed",
+        "workspace_scope_not_absolute",
+      );
+    }
+    return resolve(scope.workspacePath);
+  }
+
+  private resolveFromScope(path: string, scope: HerdrAccessScope): string {
+    return isAbsolute(path) ? resolve(path) : resolve(this.scopeBase(scope), path);
+  }
+
   private scopeRoot(scope: HerdrAccessScope): string {
-    const resolved = resolve(scope.workspacePath);
+    const resolved = this.scopeBase(scope);
     if (scope.permissionMode === "danger-full-access") return canonicalOrResolved(resolved);
     try {
       return realpathSync.native(resolved);
@@ -585,7 +605,7 @@ export class HerdrClient {
   }
 
   private requireExistingPathWithinScope(path: string, scope: HerdrAccessScope, label: string): string {
-    const resolved = resolve(path);
+    const resolved = this.resolveFromScope(path, scope);
     if (scope.permissionMode === "danger-full-access") return canonicalOrResolved(resolved);
     let canonical: string;
     try {
@@ -600,7 +620,7 @@ export class HerdrClient {
   }
 
   private requireProspectivePathWithinScope(path: string, scope: HerdrAccessScope, label: string): string {
-    const target = resolve(path);
+    const target = this.resolveFromScope(path, scope);
     if (scope.permissionMode === "danger-full-access") return target;
     const root = this.scopeRoot(scope);
     let ancestor = target;
