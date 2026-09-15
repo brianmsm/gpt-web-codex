@@ -285,10 +285,40 @@ test("tab and pane creation target explicit workspace and pane ids", async () =>
 test("run sends command plus Enter atomically to the explicit pane", async () => {
   const client = fakeClient(request => {
     expect(request.method).toBe("pane.send_input");
-    expect(request.params).toEqual({ pane_id: "wA:p1", text: "sleep 10", keys: ["Enter"] });
+    expect(request.params).toEqual({ pane_id: "wA:p1", text: "sleep 10", keys: ["enter"] });
     return { type: "ok" };
   });
   expect(await client.runPane("test", "wA:p1", "sleep 10", fullAccess)).toMatchObject({ pane_id: "wA:p1", accepted: true });
+});
+
+test("send normalizes canonical and legacy special keys before Herdr transport", async () => {
+  const client = fakeClient(request => {
+    expect(request.method).toBe("pane.send_input");
+    expect(request.params).toEqual({
+      pane_id: "wA:p1",
+      text: "",
+      keys: ["ctrl+c", "ctrl+d", "ctrl+z", "ctrl+l", "esc", "enter", "left", "right"],
+    });
+    return { type: "ok" };
+  });
+  await expect(client.sendPane(
+    "test",
+    "wA:p1",
+    "",
+    ["Ctrl-C", "ctrl+d", "Ctrl-Z", "ctrl+l", "Escape", "Enter", "Left", "right"],
+    fullAccess,
+  )).resolves.toMatchObject({ pane_id: "wA:p1", accepted: true });
+});
+
+test("send rejects special keys outside the public Herdr 0.8.2 vocabulary before transport", async () => {
+  const client = fakeClient(() => {
+    throw new Error("unexpected Herdr request");
+  });
+  await expect(client.sendPane("test", "wA:p1", "", ["Delete"], fullAccess)).rejects.toMatchObject({
+    name: "HerdrClientError",
+    code: "invalid_key",
+    health: "failed",
+  });
 });
 
 test("reads keep two panes isolated by their explicit ids", async () => {

@@ -4,6 +4,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HERDR_PUBLIC_SPECIAL_KEYS } from "../src/standalone/herdr-keys";
 
 interface ToolCallResult {
   isError?: boolean;
@@ -54,7 +55,24 @@ const sourceRepo = join(root, "source");
 const worktreePath = join(root, "worker");
 const branch = `gwc-herdr-smoke-${process.pid}`;
 const herdrAccess = { workspace_path: root, permission_mode: "workspace-write" };
+const keySinkPath = join(root, "key-sink.mjs");
+const keySinkMarker = "GWC_HERDR_KEYS_DONE";
 mkdirSync(sourceRepo);
+writeFileSync(keySinkPath, [
+  `const marker = Buffer.from(${JSON.stringify(keySinkMarker)});`,
+  `if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") { throw new Error("key sink requires a TTY"); }`,
+  `process.stdin.setRawMode(true);`,
+  `process.stdin.resume();`,
+  `process.stdout.write("GWC_HERDR_KEYS_READY\\n");`,
+  `let buffered = Buffer.alloc(0);`,
+  `process.stdin.on("data", chunk => {`,
+  `  buffered = Buffer.concat([buffered, Buffer.from(chunk)]);`,
+  `  if (!buffered.includes(marker)) return;`,
+  `  process.stdin.setRawMode(false);`,
+  `  process.stdout.write("GWC_HERDR_KEYS_OK\\n");`,
+  `  process.exit(0);`,
+  `});`,
+].join("\n"), "utf8");
 execFileSync("git", ["init", "-b", "main"], { cwd: sourceRepo, stdio: "ignore" });
 execFileSync("git", ["config", "user.email", "gwc-herdr-smoke@localhost"], { cwd: sourceRepo });
 execFileSync("git", ["config", "user.name", "GWC Herdr Smoke"], { cwd: sourceRepo });
@@ -108,6 +126,56 @@ try {
     source: "recent",
     match_type: "substring",
     match: "GWC_HERDR_READY",
+    timeout_ms: 5_000,
+  });
+
+  const keySplit = await callTool(first, "herdr_pane_split", {
+    session,
+    ...herdrAccess,
+    target_pane_id: paneId,
+    direction: "right",
+    cwd: "worker",
+  });
+  const keyPane = asRecord(keySplit.pane, "special-key pane");
+  const keyPaneId = stringField(keyPane, "pane_id");
+  await callTool(first, "herdr_pane_run", {
+    session,
+    ...herdrAccess,
+    pane_id: keyPaneId,
+    command: `${process.execPath} ${keySinkPath}`,
+  });
+  await callTool(first, "herdr_pane_wait", {
+    session,
+    ...herdrAccess,
+    pane_id: keyPaneId,
+    source: "recent",
+    match_type: "substring",
+    match: "GWC_HERDR_KEYS_READY",
+    timeout_ms: 5_000,
+  });
+  const testedSpecialKeys: string[] = [];
+  for (const key of HERDR_PUBLIC_SPECIAL_KEYS) {
+    await callTool(first, "herdr_pane_send", {
+      session,
+      ...herdrAccess,
+      pane_id: keyPaneId,
+      keys: [key],
+    });
+    testedSpecialKeys.push(key);
+  }
+  await callTool(first, "herdr_pane_send", {
+    session,
+    ...herdrAccess,
+    pane_id: keyPaneId,
+    text: keySinkMarker,
+  });
+  await callTool(first, "herdr_pane_wait", {
+    session,
+    ...herdrAccess,
+    pane_id: keyPaneId,
+    source: "recent",
+    match_type: "substring",
+    match: "GWC_HERDR_KEYS_OK",
     timeout_ms: 5_000,
   });
   await callTool(first, "herdr_pane_send", {
@@ -181,9 +249,11 @@ try {
     timeout_ms: 5_000,
   });
 
+  const selectedHealth = asRecord(health.selected, "selected session");
   const receipt = {
     ok: true,
     session,
+    herdr_version: selectedHealth.version ?? null,
     source_repo: sourceRepo,
     worktree_path: worktreePath,
     branch,
@@ -193,7 +263,9 @@ try {
     tab_id: tabId,
     pane_id: paneId,
     terminal_id: terminalId,
-    protocol: asRecord(health.selected, "selected session").protocol ?? null,
+    special_key_pane_id: keyPaneId,
+    tested_special_keys: testedSpecialKeys,
+    protocol: selectedHealth.protocol ?? null,
     before_restart_health: beforeRestart.health ?? null,
     after_restart_health: afterRestart.health ?? null,
     same_pane_after_mcp_restart: true,

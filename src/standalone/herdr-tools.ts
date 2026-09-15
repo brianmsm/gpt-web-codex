@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { HerdrClient, HerdrClientError, type HerdrAccessScope } from "./herdr-client";
+import { HERDR_PUBLIC_SPECIAL_KEYS } from "./herdr-keys";
 
 const noAuth = [{ type: "noauth" as const }];
 const sessionName = z.string().min(1).max(200);
@@ -9,11 +10,9 @@ const localPath = z.string().min(1).max(16_384);
 const label = z.string().min(1).max(200);
 const permissionMode = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const readSource = z.enum(["visible", "recent", "recent_unwrapped", "detection"]);
-const specialKey = z.enum([
-  "Enter", "Tab", "Escape", "Backspace", "Delete",
-  "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown",
-  "Ctrl-C", "Ctrl-D", "Ctrl-Z", "Ctrl-L",
-]);
+const specialKey = z.enum(HERDR_PUBLIC_SPECIAL_KEYS).describe(
+  "Herdr 0.8.2 special key. Prefer canonical lowercase values; legacy GWC aliases are normalized explicitly before transport.",
+);
 const health = z.enum(["healthy", "failed", "unknown", "not_found"]);
 const errorDetails = z.object({ code: z.string(), message: z.string() });
 const operationOutput = {

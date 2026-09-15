@@ -4,6 +4,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { Socket } from "node:net";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { normalizeHerdrSpecialKey } from "./herdr-keys";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -424,19 +425,26 @@ export class HerdrClient {
     this.expectResult(await this.requestResult(session, "pane.send_input", {
       pane_id: paneId,
       text: command,
-      keys: ["Enter"],
+      keys: ["enter"],
     }), "ok");
     return { session: session.name, socket_path: session.socketPath, pane_id: paneId, accepted: true };
   }
 
   async sendPane(sessionName: string, paneId: string, text: string, keys: string[], scope: HerdrAccessScope) {
+    const wireKeys = keys.map(key => {
+      const wireKey = normalizeHerdrSpecialKey(key);
+      if (!wireKey) {
+        throw new HerdrClientError(`Unsupported Herdr special key: ${key}`, "failed", "invalid_key");
+      }
+      return wireKey;
+    });
     const session = await this.requireOperationalSession(sessionName, scope);
     this.assertMutable(scope, "Herdr pane input");
     if (scope.permissionMode !== "danger-full-access") {
       const state = await this.snapshot(session);
       this.assertPaneInScope(state, paneId, scope);
     }
-    this.expectResult(await this.requestResult(session, "pane.send_input", { pane_id: paneId, text, keys }), "ok");
+    this.expectResult(await this.requestResult(session, "pane.send_input", { pane_id: paneId, text, keys: wireKeys }), "ok");
     return { session: session.name, socket_path: session.socketPath, pane_id: paneId, accepted: true };
   }
 

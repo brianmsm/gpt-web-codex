@@ -88,6 +88,14 @@ This access boundary authorizes **which Herdr workspace/pane GWC may control**; 
 
 All rows except `herdr_status` additionally require `workspace_path` and accept `permission_mode` (default `workspace-write`).
 
+### `herdr_pane_send` special keys
+
+For Herdr 0.8.2, GWC publishes only key names that the Socket API can actually parse. Prefer the canonical Herdr wire vocabulary: `enter`, `tab`, `esc`, `backspace`, `up`, `down`, `left`, `right`, `ctrl+c`, `ctrl+d`, `ctrl+z`, and `ctrl+l`.
+
+For compatibility with the original GWC schema, these legacy aliases remain accepted and are normalized through an explicit map before transport: `Enter` → `enter`, `Tab` → `tab`, `Escape` → `esc`, `Backspace` → `backspace`, `Up` → `up`, `Down` → `down`, `Left` → `left`, `Right` → `right`, `Ctrl-C` → `ctrl+c`, `Ctrl-D` → `ctrl+d`, `Ctrl-Z` → `ctrl+z`, and `Ctrl-L` → `ctrl+l`. GWC does not generically lowercase arbitrary key strings.
+
+`Delete`, `Home`, `End`, `PageUp`, and `PageDown` were previously advertised by GWC but are not accepted by the Herdr 0.8.2 API key parser, so they are no longer part of the MCP schema.
+
 There is deliberately no generic `herdr_call(method,args)` tool and no dedicated Herdr lifecycle tool for `close`, `remove`, `kill`, or `stop` in the MVP. This does **not** make PTY command/input tools harmless: `herdr_pane_run` can execute arbitrary shell commands and `herdr_pane_send` can submit commands or signals, so both are marked destructive/open-world in MCP annotations.
 
 The bridge distinguishes `healthy`, `failed`, `unknown`, and `not_found` where the Herdr response allows it. A transport timeout or `pane.wait_for_output` timeout maps to `unknown`, not to a dead process. Observational failures never cause cleanup.
@@ -120,7 +128,7 @@ Run:
 GWC_HERDR_SESSION=default bun run smoke:herdr
 ```
 
-The smoke test creates a disposable Git repository under one `/tmp/gwc-herdr-smoke-*` scope, passes that directory as `workspace_path`, opens its source checkout as an integration workspace, asks Herdr to create a linked worktree/workspace at an explicit in-scope path, starts a real PTY worker, reads and writes it through MCP, closes the first MCP client, starts a fresh MCP client, and proves that the fresh process can read and write the **same pane ID**. It ends only the test worker loop; the Herdr shell/workspace is intentionally left open for visual inspection.
+The smoke test creates a disposable Git repository under one `/tmp/gwc-herdr-smoke-*` scope, passes that directory as `workspace_path`, opens its source checkout as an integration workspace, asks Herdr to create a linked worktree/workspace at an explicit in-scope path, starts a real PTY worker, and creates a second raw-input PTY that exercises **every special-key value published by the MCP schema**. It then reads and writes the worker through MCP, closes the first MCP client, starts a fresh MCP client, and proves that the fresh process can read and write the **same pane ID**. It ends the two test processes cleanly; the Herdr workspace and shell panes are intentionally left open for visual inspection.
 
 The receipt includes:
 
@@ -129,6 +137,8 @@ The receipt includes:
 - `tab_id`;
 - `pane_id`;
 - `terminal_id`;
+- `herdr_version` and negotiated protocol;
+- `special_key_pane_id` and the complete `tested_special_keys` list;
 - branch and worktree path;
 - health before/after the MCP restart.
 

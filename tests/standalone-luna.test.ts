@@ -404,6 +404,21 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(herdrRead?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     expect(herdrSend?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    expect(herdrSend?.inputSchema).toMatchObject({
+      properties: {
+        keys: {
+          type: "array",
+          items: {
+            enum: [
+              "enter", "tab", "esc", "backspace", "up", "down", "left", "right",
+              "ctrl+c", "ctrl+d", "ctrl+z", "ctrl+l",
+              "Enter", "Tab", "Escape", "Backspace", "Up", "Down", "Left", "Right",
+              "Ctrl-C", "Ctrl-D", "Ctrl-Z", "Ctrl-L",
+            ],
+          },
+        },
+      },
+    });
     expect(herdrWorkspaceOpen?.annotations).toMatchObject({ idempotentHint: false });
     expect(herdrRun?.inputSchema).toMatchObject({
       properties: {
