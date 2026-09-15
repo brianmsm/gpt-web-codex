@@ -592,7 +592,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_edit", {
     title: "Edit a local text file exactly",
-    description: "Replace exact text in one existing UTF-8 text file. By default old_text must occur exactly once. When expected_occurrences is provided, the file must contain exactly that many non-overlapping matches and all of them are replaced. No fuzzy matching is performed. Disabled in read-only mode; workspace-write rejects path traversal and symlink escapes.",
+    description: "Replace exact text in one existing UTF-8 text file. By default old_text must occur exactly once. When expected_occurrences is provided, the file must contain exactly that many non-overlapping matches and all of them are replaced. No fuzzy matching is performed. Existing and resulting files are capped at 16 MiB. Disabled in read-only mode; workspace-write rejects path traversal and symlink escapes.",
     inputSchema: z.object({
       path: z.string().min(1),
       old_text: z.string().min(1).max(1_000_000),
@@ -613,7 +613,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_apply_patch", {
     title: "Apply a strict unified diff to local text files",
-    description: "Apply a strict unified diff to one or more existing UTF-8 text files. File creation, deletion, rename, mode changes, quoted paths, fuzzy offsets, and context relocation are not supported. Every file and hunk is parsed and validated before writes begin; workspace-write rejects path traversal and symlink escapes. Disabled in read-only mode.",
+    description: "Apply a strict unified diff to one or more existing UTF-8 text files. File creation, deletion, rename, mode changes, quoted paths, fuzzy offsets, and context relocation are not supported. Every file and hunk is parsed and validated before writes begin. Existing and resulting files are capped at 16 MiB, with a 64 MiB aggregate mutation budget. workspace-write rejects path traversal and symlink escapes. Disabled in read-only mode.",
     inputSchema: z.object({
       patch: z.string().min(1).max(5_000_000),
       workspace_path: z.string().min(1),

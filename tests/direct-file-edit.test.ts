@@ -20,6 +20,9 @@ function unified(...lines: string[]): string {
   return `${lines.join("\n")}\n`;
 }
 
+const TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
+const TEXT_MUTATION_TRANSACTION_BYTES = 64 * 1024 * 1024;
+
 test("file_edit replaces one exact occurrence and reports the byte change", () => {
   withWorkspace((_root, workspace, tools) => {
     writeFileSync(join(workspace, "sample.txt"), "alpha beta gamma\n", "utf8");
@@ -382,7 +385,135 @@ test("file_apply_patch rejects either direction of stale final-newline context",
   });
 });
 
-test("file_apply_patch preserves a concurrent edit when rollback follows a partial commit", () => {
+test("file_edit rejects oversized existing and updated files without modifying them", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const oversized = join(workspace, "oversized-existing.txt");
+    writeFileSync(oversized, Buffer.alloc(TEXT_MUTATION_FILE_BYTES + 1, 0x61));
+    expect(() => tools.edit(
+      "oversized-existing.txt", "a", "b", workspace, "workspace-write",
+    )).toThrow("existing file is too large");
+    expect(statSync(oversized).size).toBe(TEXT_MUTATION_FILE_BYTES + 1);
+
+    const oversizedResult = join(workspace, "oversized-result.txt");
+    const original = `old\n${"x".repeat(12 * 1024 * 1024)}\n`;
+    writeFileSync(oversizedResult, original, "utf8");
+    const replacement = "z".repeat(5_000_000);
+    expect(() => tools.edit(
+      "oversized-result.txt", "old", replacement, workspace, "workspace-write",
+    )).toThrow("updated file is too large");
+    expect(readFileSync(oversizedResult, "utf8")).toBe(original);
+  });
+});
+
+test("file_apply_patch bounds the aggregate multi-file mutation transaction", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const fileCount = 4;
+    const payload = "x".repeat(TEXT_MUTATION_TRANSACTION_BYTES / 8);
+    const patch: string[] = [];
+    for (let index = 1; index <= fileCount; index += 1) {
+      const relative = `budget-${index}.txt`;
+      writeFileSync(join(workspace, relative), `old\n${payload}\n`, "utf8");
+      patch.push(
+        `--- a/${relative}`,
+        `+++ b/${relative}`,
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+      );
+    }
+
+    expect(() => tools.applyPatch(
+      unified(...patch), workspace, "workspace-write",
+    )).toThrow("transaction limit");
+    for (let index = 1; index <= fileCount; index += 1) {
+      expect(readFileSync(join(workspace, `budget-${index}.txt`), "utf8")).toBe(`old\n${payload}\n`);
+    }
+  });
+});
+
+test("file_apply_patch handles strict pure insertions and deletions at file boundaries", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "boundaries.txt");
+    writeFileSync(path, "one\ntwo\n", "utf8");
+
+    tools.applyPatch(unified(
+      "--- a/boundaries.txt",
+      "+++ b/boundaries.txt",
+      "@@ -0,0 +1 @@",
+      "+zero",
+      "@@ -2,0 +4 @@",
+      "+three",
+    ), workspace, "workspace-write");
+    expect(readFileSync(path, "utf8")).toBe("zero\none\ntwo\nthree\n");
+
+    tools.applyPatch(unified(
+      "--- a/boundaries.txt",
+      "+++ b/boundaries.txt",
+      "@@ -1 +0,0 @@",
+      "-zero",
+      "@@ -4 +2,0 @@",
+      "-three",
+    ), workspace, "workspace-write");
+    expect(readFileSync(path, "utf8")).toBe("one\ntwo\n");
+  });
+});
+
+test("file_apply_patch preserves mixed line endings on untouched and context lines", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "mixed-eol.txt");
+    writeFileSync(path, "one\r\ntwo\nthree\r\n", "utf8");
+    tools.applyPatch(unified(
+      "--- a/mixed-eol.txt",
+      "+++ b/mixed-eol.txt",
+      "@@ -1,3 +1,3 @@",
+      " one\r",
+      "-two",
+      "+TWO",
+      " three\r",
+    ), workspace, "workspace-write");
+    expect(readFileSync(path)).toEqual(Buffer.from("one\r\nTWO\nthree\r\n", "utf8"));
+  });
+});
+
+test("file_apply_patch cleans all staging files after a successful rollback", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const first = join(workspace, "first-clean-rollback.txt");
+    const second = join(workspace, "second-clean-rollback.txt");
+    writeFileSync(first, "first\n", "utf8");
+    writeFileSync(second, "second\n", "utf8");
+
+    const originalRename = fs.renameSync;
+    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+      if (String(oldPath).includes(".second-clean-rollback.txt.gwc-updated-")) {
+        throw new Error("synthetic second-file commit failure");
+      }
+      originalRename(oldPath, newPath);
+    }) as typeof fs.renameSync);
+
+    try {
+      expect(() => tools.applyPatch(unified(
+        "--- a/first-clean-rollback.txt",
+        "+++ b/first-clean-rollback.txt",
+        "@@ -1 +1 @@",
+        "-first",
+        "+FIRST",
+        "--- a/second-clean-rollback.txt",
+        "+++ b/second-clean-rollback.txt",
+        "@@ -1 +1 @@",
+        "-second",
+        "+SECOND",
+      ), workspace, "workspace-write")).toThrow("synthetic second-file commit failure");
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(readFileSync(first, "utf8")).toBe("first\n");
+    expect(readFileSync(second, "utf8")).toBe("second\n");
+    expect(fs.readdirSync(workspace).filter(name => name.includes(".gwc-"))).toEqual([]);
+  });
+});
+
+test("file_apply_patch preserves only the useful recovery backup after a concurrent rollback conflict", () => {
   withWorkspace((_root, workspace, tools) => {
     const first = join(workspace, "first-race.txt");
     const second = join(workspace, "second-race.txt");
@@ -402,8 +533,9 @@ test("file_apply_patch preserves a concurrent edit when rollback follows a parti
       }
     }) as typeof fs.renameSync);
 
+    let failure: Error | undefined;
     try {
-      expect(() => tools.applyPatch(unified(
+      tools.applyPatch(unified(
         "--- a/first-race.txt",
         "+++ b/first-race.txt",
         "@@ -1 +1 @@",
@@ -414,14 +546,76 @@ test("file_apply_patch preserves a concurrent edit when rollback follows a parti
         "@@ -1 +1 @@",
         "-second",
         "+SECOND",
-      ), workspace, "workspace-write")).toThrow("rollback was incomplete");
+      ), workspace, "workspace-write");
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
     } finally {
       renameSpy.mockRestore();
     }
 
+    expect(failure?.message).toContain("rollback was incomplete");
     expect(injectedConcurrentChange).toBe(true);
     expect(readFileSync(first, "utf8")).toBe("external-first\n");
     expect(readFileSync(second, "utf8")).toBe("external-second\n");
+
+    const leftovers = fs.readdirSync(workspace).filter(name => name.includes(".gwc-"));
+    expect(leftovers).toHaveLength(1);
+    expect(leftovers[0]).toContain(".first-race.txt.gwc-rollback-");
+    const recoveryPath = join(workspace, leftovers[0]!);
+    expect(readFileSync(recoveryPath, "utf8")).toBe("first\n");
+    expect(failure?.message).toContain(`original preserved at ${recoveryPath}`);
+  });
+});
+
+test("file_apply_patch preserves and reports the rollback backup when restoration itself fails", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const first = join(workspace, "first-rollback-failure.txt");
+    const second = join(workspace, "second-rollback-failure.txt");
+    writeFileSync(first, "first\n", "utf8");
+    writeFileSync(second, "second\n", "utf8");
+
+    const originalRename = fs.renameSync;
+    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+      const source = String(oldPath);
+      if (source.includes(".second-rollback-failure.txt.gwc-updated-")) {
+        throw new Error("synthetic second-file commit failure");
+      }
+      if (String(newPath) === first && source.includes(".gwc-rollback-")) {
+        throw new Error("synthetic rollback rename failure");
+      }
+      originalRename(oldPath, newPath);
+    }) as typeof fs.renameSync);
+
+    let failure: Error | undefined;
+    try {
+      tools.applyPatch(unified(
+        "--- a/first-rollback-failure.txt",
+        "+++ b/first-rollback-failure.txt",
+        "@@ -1 +1 @@",
+        "-first",
+        "+FIRST",
+        "--- a/second-rollback-failure.txt",
+        "+++ b/second-rollback-failure.txt",
+        "@@ -1 +1 @@",
+        "-second",
+        "+SECOND",
+      ), workspace, "workspace-write");
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(failure?.message).toContain("synthetic rollback rename failure");
+    expect(readFileSync(first, "utf8")).toBe("FIRST\n");
+    expect(readFileSync(second, "utf8")).toBe("second\n");
+
+    const leftovers = fs.readdirSync(workspace).filter(name => name.includes(".gwc-"));
+    expect(leftovers).toHaveLength(1);
+    expect(leftovers[0]).toContain(".first-rollback-failure.txt.gwc-rollback-");
+    const recoveryPath = join(workspace, leftovers[0]!);
+    expect(readFileSync(recoveryPath, "utf8")).toBe("first\n");
+    expect(failure?.message).toContain(`original preserved at ${recoveryPath}`);
   });
 });
 

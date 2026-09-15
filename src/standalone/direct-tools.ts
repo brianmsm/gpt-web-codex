@@ -22,6 +22,8 @@ import { terminateOwnedProcessTree } from "./process-tree";
 const MAX_DIRECT_IMAGE_BYTES = 20_000_000;
 const MAX_SOURCE_IMAGE_BYTES = 50_000_000;
 const MODEL_IMAGE_MAX_DIMENSION = 1_600;
+const MAX_TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_TEXT_MUTATION_TRANSACTION_BYTES = 64 * 1024 * 1024;
 
 export interface DirectTextFileRead {
   path: string;
@@ -178,14 +180,46 @@ function decodeTextFile(bytes: Buffer, path: string): string {
   return text;
 }
 
+function assertMutationFileSize(bytes: number, path: string, state: "existing" | "updated"): void {
+  if (bytes <= MAX_TEXT_MUTATION_FILE_BYTES) return;
+  throw new Error(
+    `Structured text mutation ${state} file is too large: ${path} (${bytes} bytes; limit ${MAX_TEXT_MUTATION_FILE_BYTES})`,
+  );
+}
+
+function readMutationBytes(path: string): Buffer {
+  assertMutationFileSize(statSync(path).size, path, "existing");
+  const bytes = readFileSync(path);
+  assertMutationFileSize(bytes.length, path, "existing");
+  return bytes;
+}
+
 function readMutationTarget(path: string, workspace: string, mode: LunaSandbox): {
   path: string;
   bytes: Buffer;
   text: string;
 } {
   const target = resolveExistingMutationTarget(path, workspace, mode);
-  const bytes = readFileSync(target);
+  const bytes = readMutationBytes(target);
   return { path: target, bytes, text: decodeTextFile(bytes, target) };
+}
+
+function reserveMutationTransactionBytes(
+  used: number,
+  path: string,
+  original: Buffer,
+  updated: Buffer,
+  operation: string,
+): number {
+  assertMutationFileSize(updated.length, path, "updated");
+  const next = used + original.length + updated.length;
+  if (next > MAX_TEXT_MUTATION_TRANSACTION_BYTES) {
+    throw new Error(
+      `${operation} exceeds the structured text mutation transaction limit while planning ${path} `
+      + `(${next} bytes; limit ${MAX_TEXT_MUTATION_TRANSACTION_BYTES})`,
+    );
+  }
+  return next;
 }
 
 function countOccurrences(text: string, needle: string): number {
@@ -209,7 +243,7 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
   if (changed.length === 0) return;
 
   for (const plan of changed) {
-    const current = readFileSync(plan.path);
+    const current = readMutationBytes(plan.path);
     if (!current.equals(plan.original)) {
       throw new Error(`${operation} aborted because the file changed during validation: ${plan.path}`);
     }
@@ -221,10 +255,12 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
     rollbackTemp: stagedMutationPath(plan.path, "rollback"),
     mode: statSync(plan.path).mode & 0o777,
   }));
-  const cleanup = () => {
+  const cleanup = (preservedRollbacks = new Set<string>()) => {
     for (const plan of staged) {
       try { rmSync(plan.updatedTemp, { force: true }); } catch {}
-      try { rmSync(plan.rollbackTemp, { force: true }); } catch {}
+      if (!preservedRollbacks.has(plan.rollbackTemp)) {
+        try { rmSync(plan.rollbackTemp, { force: true }); } catch {}
+      }
     }
   };
 
@@ -236,7 +272,7 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
       chmodSync(plan.rollbackTemp, plan.mode);
     }
     for (const plan of staged) {
-      const current = readFileSync(plan.path);
+      const current = readMutationBytes(plan.path);
       if (!current.equals(plan.original)) {
         throw new Error(`${operation} aborted because the file changed during staging: ${plan.path}`);
       }
@@ -249,7 +285,7 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
   const touched: typeof staged = [];
   try {
     for (const plan of staged) {
-      const current = readFileSync(plan.path);
+      const current = readMutationBytes(plan.path);
       if (!current.equals(plan.original)) {
         throw new Error(`${operation} aborted because the file changed before commit: ${plan.path}`);
       }
@@ -258,19 +294,30 @@ function commitTextMutations(plans: PreparedTextMutation[], operation: string): 
     }
   } catch (error) {
     const rollbackErrors: string[] = [];
+    const preservedRollbacks = new Set<string>();
+    const preserveRollback = (plan: (typeof staged)[number]): string => {
+      if (!existsSync(plan.rollbackTemp)) return "";
+      preservedRollbacks.add(plan.rollbackTemp);
+      return `; original preserved at ${plan.rollbackTemp}`;
+    };
     for (const plan of touched.reverse()) {
       try {
-        const current = readFileSync(plan.path);
+        const current = readMutationBytes(plan.path);
         if (!current.equals(plan.updated)) {
-          rollbackErrors.push(`${plan.path}: file changed after commit; refusing to overwrite concurrent changes`);
+          rollbackErrors.push(
+            `${plan.path}: file changed after commit; refusing to overwrite concurrent changes${preserveRollback(plan)}`,
+          );
           continue;
         }
         renameSync(plan.rollbackTemp, plan.path);
       } catch (rollbackError) {
-        rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        rollbackErrors.push(
+          `${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}${preserveRollback(plan)}`,
+        );
       }
     }
     if (rollbackErrors.length > 0) {
+      cleanup(preservedRollbacks);
       throw new Error(`${operation} failed and rollback was incomplete: ${rollbackErrors.join("; ")}`, { cause: error });
     }
     cleanup();
@@ -631,6 +678,7 @@ export class DirectToolService {
 
     const updatedText = source.text.split(oldText).join(newText);
     const updated = Buffer.from(updatedText, "utf8");
+    reserveMutationTransactionBytes(0, source.path, source.bytes, updated, "File edit");
     commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
     return {
       path: source.path,
@@ -647,6 +695,7 @@ export class DirectToolService {
     const canonicalTargets = new Set<string>();
     const plans: PreparedTextMutation[] = [];
     const files: DirectFilePatchResult["files"] = [];
+    let transactionBytes = 0;
 
     for (const file of parsed) {
       const source = readMutationTarget(file.path, workspace, mode);
@@ -656,6 +705,9 @@ export class DirectToolService {
       canonicalTargets.add(source.path);
       const updatedText = applyUnifiedHunks(file.path, source.text, file.hunks);
       const updated = Buffer.from(updatedText, "utf8");
+      transactionBytes = reserveMutationTransactionBytes(
+        transactionBytes, source.path, source.bytes, updated, "File patch",
+      );
       plans.push({ path: source.path, original: source.bytes, updated });
       files.push({
         path: source.path,
