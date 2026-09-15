@@ -207,12 +207,12 @@ function readMutationTarget(path: string, workspace: string, mode: LunaSandbox):
 function reserveMutationTransactionBytes(
   used: number,
   path: string,
-  original: Buffer,
-  updated: Buffer,
+  originalBytes: number,
+  updatedBytes: number,
   operation: string,
 ): number {
-  assertMutationFileSize(updated.length, path, "updated");
-  const next = used + original.length + updated.length;
+  assertMutationFileSize(updatedBytes, path, "updated");
+  const next = used + originalBytes + updatedBytes;
   if (next > MAX_TEXT_MUTATION_TRANSACTION_BYTES) {
     throw new Error(
       `${operation} exceeds the structured text mutation transaction limit while planning ${path} `
@@ -676,9 +676,27 @@ export class DirectToolService {
       throw new Error(`Expected ${expected} occurrences of old_text in ${source.path}, found ${occurrences}`);
     }
 
-    const updatedText = source.text.split(oldText).join(newText);
+    if (oldText === newText) {
+      return {
+        path: source.path,
+        replacements: occurrences,
+        changed: false,
+        bytes_before: source.bytes.length,
+        bytes_after: source.bytes.length,
+      };
+    }
+
+    const oldBytes = Buffer.byteLength(oldText, "utf8");
+    const newBytes = Buffer.byteLength(newText, "utf8");
+    const expectedUpdatedBytes = source.bytes.length + occurrences * (newBytes - oldBytes);
+    // Reject multiplicative expansion before replaceAll can materialize the result.
+    reserveMutationTransactionBytes(
+      0, source.path, source.bytes.length, expectedUpdatedBytes, "File edit",
+    );
+
+    const updatedText = source.text.replaceAll(oldText, () => newText);
     const updated = Buffer.from(updatedText, "utf8");
-    reserveMutationTransactionBytes(0, source.path, source.bytes, updated, "File edit");
+    reserveMutationTransactionBytes(0, source.path, source.bytes.length, updated.length, "File edit");
     commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
     return {
       path: source.path,
@@ -706,7 +724,7 @@ export class DirectToolService {
       const updatedText = applyUnifiedHunks(file.path, source.text, file.hunks);
       const updated = Buffer.from(updatedText, "utf8");
       transactionBytes = reserveMutationTransactionBytes(
-        transactionBytes, source.path, source.bytes, updated, "File patch",
+        transactionBytes, source.path, source.bytes.length, updated.length, "File patch",
       );
       plans.push({ path: source.path, original: source.bytes, updated });
       files.push({

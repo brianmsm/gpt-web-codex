@@ -385,6 +385,48 @@ test("file_apply_patch rejects either direction of stale final-newline context",
   });
 });
 
+test("file_edit rejects explosive multi-match expansion before materializing the replacement", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "explosive-edit.txt");
+    const original = "a".repeat(1_000);
+    const replacement = "z".repeat(5_000_000);
+    writeFileSync(path, original, "utf8");
+
+    expect(() => tools.edit(
+      "explosive-edit.txt", "a", replacement, workspace, "workspace-write", 1_000,
+    )).toThrow("updated file is too large");
+    expect(readFileSync(path, "utf8")).toBe(original);
+    expect(fs.readdirSync(workspace).filter(name => name.includes(".gwc-"))).toEqual([]);
+  });
+});
+
+test("file_edit keeps replacement-dollar sequences literal without split arrays", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "literal-replacement.txt");
+    writeFileSync(path, "a a\n", "utf8");
+
+    const result = tools.edit(
+      "literal-replacement.txt", "a", "$&$$$`$'", workspace, "workspace-write", 2,
+    );
+    expect(result.replacements).toBe(2);
+    expect(readFileSync(path, "utf8")).toBe("$&$$$`$' $&$$$`$'\n");
+  });
+});
+
+test("file_edit prospective byte accounting stays exact for multi-byte Unicode", () => {
+  withWorkspace((_root, workspace, tools) => {
+    const path = join(workspace, "unicode-bytes.txt");
+    writeFileSync(path, "é😀|é😀\n", "utf8");
+
+    const result = tools.edit(
+      "unicode-bytes.txt", "é😀", "漢", workspace, "workspace-write", 2,
+    );
+    expect(result.bytes_before).toBe(Buffer.byteLength("é😀|é😀\n", "utf8"));
+    expect(result.bytes_after).toBe(Buffer.byteLength("漢|漢\n", "utf8"));
+    expect(readFileSync(path, "utf8")).toBe("漢|漢\n");
+  });
+});
+
 test("file_edit rejects oversized existing and updated files without modifying them", () => {
   withWorkspace((_root, workspace, tools) => {
     const oversized = join(workspace, "oversized-existing.txt");
