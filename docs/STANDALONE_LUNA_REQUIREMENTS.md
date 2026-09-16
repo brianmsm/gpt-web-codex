@@ -29,6 +29,16 @@ Expose both tool families by default:
 ChatGPT may use direct tools for narrow operations and Luna for agentic execution. Work in one Luna
 session is serialized. Separate Web conversations may run independently.
 
+For direct model-side visual inspection, `file_read` is the preferred image tool because it transfers
+PNG/JPEG/GIF/WebP as native MCP image content without mounting presentation UI. Terminal renderers such
+as `chafa`, `viu`, or `img2txt` must not be searched for, installed, or used as a substitute while
+native MCP image transfer is available, unless the user explicitly asked to view the image inside
+their terminal. `file_image_preview` is the presentation tool and is used when the user should see the
+image inline, explicitly requested a preview, or `codexluna_status` recommends automatic presentation.
+For HTML/PDF layout inspection, render only the relevant view or page to PNG/JPEG/WebP and inspect the
+rendered image with `file_read`; add `file_image_preview` only when that rendered view should also be
+shown inline to the user.
+
 When Luna creates, inspects, or relies on a local image that is materially relevant to the final
 answer, it must report the exact absolute path even when the user did not explicitly ask for a
 preview. The job keeps all observed image paths in `image_artifacts`, but only final-answer image

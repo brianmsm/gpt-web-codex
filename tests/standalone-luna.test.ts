@@ -436,6 +436,10 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("automatically call file_image_preview exactly once");
     expect(client.getInstructions()).toContain("expected_image_content_key=image_preview_content_key");
     expect(client.getInstructions()).toContain("rejects a duplicate automatic claim");
+    expect(client.getInstructions()).toContain("For model-side visual inspection of a local PNG, JPEG, GIF, or WebP, prefer file_read");
+    expect(client.getInstructions()).toContain("Do not search for, install, or use terminal image renderers such as chafa, viu, or img2txt");
+    expect(client.getInstructions()).toContain("If the user explicitly asks to view an image inside their terminal, a terminal renderer is allowed");
+    expect(client.getInstructions()).toContain("For HTML or PDF layout inspection, render only the relevant view or page");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
@@ -453,6 +457,12 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     ]);
     expect(listedTools.every(tool => tool.outputSchema && typeof tool.outputSchema === "object")).toBe(true);
     expect(listedTools.every(tool => Array.isArray(tool._meta?.securitySchemes))).toBe(true);
+    const fileReadTool = listedTools.find(tool => tool.name === "file_read");
+    const fileImagePreviewTool = listedTools.find(tool => tool.name === "file_image_preview");
+    expect(fileReadTool?.description).toContain("preferred tool for model-side visual inspection");
+    expect(fileReadTool?.description).toContain("do not use terminal ASCII/image renderers as a substitute");
+    expect(fileImagePreviewTool?.description).toContain("Presentation tool");
+    expect(fileImagePreviewTool?.description).toContain("Prefer file_read for model-only visual inspection");
     expect(listedTools.map(tool => JSON.stringify(tool._meta ?? {})).join("\n")).not.toMatch(/[\u3400-\u9fff]/);
     expect(listedTools.find(tool => tool.name === "codexluna_status")?._meta).toMatchObject({
       "openai/toolInvocation/invoking": "Checking Luna task",

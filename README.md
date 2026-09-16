@@ -44,8 +44,9 @@ OpenAI Tunnel → standalone local MCP runtime
 
 ## Image previews and page refreshes
 
-- Use `file_read` when ChatGPT needs to inspect a local image as native MCP image content.
-- Use `file_image_preview` when the image should also appear as a visible card in the conversation.
+- Use `file_read` as the preferred path when ChatGPT needs to inspect a local PNG/JPEG/GIF/WebP as native MCP image content. Do not substitute terminal renderers such as `chafa`, `viu`, or `img2txt` unless the user explicitly asked to view the image inside their terminal.
+- Use `file_image_preview` when the image should appear as a visible card in the conversation, including an explicit user preview request or a `codexluna_status` automatic recommendation. For model-only inspection, prefer `file_read`.
+- For HTML/PDF layout inspection, render only the relevant view or page to PNG/JPEG/WebP and inspect that rendered image with `file_read`; additionally call `file_image_preview` only when the rendered view should be shown inline to the user.
 - Luna keeps every verified image path in `image_artifacts`, but automatic presentation uses only images cited in Luna's final answer; an explicit user image request may fall back to the first verified observed image if the final message omitted its path. Purely intermediate images from non-image requests are not auto-presented.
 - When a completed `codexluna_status` returns `image_preview_recommended: true`, ChatGPT calls `file_image_preview` once for `image_preview_path`, passing `web_session_id` and `expected_image_content_key=image_preview_content_key`. The status tool itself never mounts UI. A successful preview is recorded in bounded session-scoped runtime state; later polls report `image_preview_already_presented: true`, stop recommending the same content, and do not resend its native image. Duplicate automatic claims are rejected, while an explicit repeat can reuse the existing preview ID.
 - Each successfully rendered card persists only its opaque preview ID and small metadata through that card's `window.openai.widgetState`; there is no conversation-global `localStorage`/`sessionStorage` preview ledger. Image bytes stay in the bounded private local preview cache.
