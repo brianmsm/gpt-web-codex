@@ -34,17 +34,25 @@ const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out
 const compactPolicySchema = z.string();
 const noAuth = [{ type: "noauth" as const }];
 
-function conversationSessionId(
+function optionalConversationSessionId(
   explicit: string | undefined,
   meta: Record<string, unknown> | undefined,
-  allowCreate: boolean,
-): string {
+): string | undefined {
   if (explicit?.trim()) return explicit.trim();
   const chatSession = meta?.["openai/session"];
   if (typeof chatSession === "string" && chatSession.trim()) {
     const digest = createHash("sha256").update(chatSession.trim(), "utf8").digest("hex");
     return `chatgpt:${digest}`;
   }
+}
+
+function conversationSessionId(
+  explicit: string | undefined,
+  meta: Record<string, unknown> | undefined,
+  allowCreate: boolean,
+): string {
+  const resolved = optionalConversationSessionId(explicit, meta);
+  if (resolved) return resolved;
   if (allowCreate) return `webgpt:${randomUUID()}`;
   throw new Error("web_session_id is required because ChatGPT did not provide openai/session metadata");
 }
@@ -189,16 +197,21 @@ function fileReadResult(value: Awaited<ReturnType<DirectToolService["readForTran
 }
 
 function fileImagePreviewResult(
-  value: Awaited<ReturnType<DirectToolService["readForTransfer"]>>,
-  cache: ImagePreviewCache,
+  value: Extract<Awaited<ReturnType<DirectToolService["readForTransfer"]>>, { data: string }>,
+  cached: CachedImagePreview,
+  contentKey: string,
+  alreadyPresented: boolean,
 ) {
-  if (!("data" in value)) throw new Error(`Local file is not a supported image: ${value.path}`);
-  const cached = cache.put(value);
   const metadata = imageMetadata(value);
   const cachedMetadata = cachedImageMetadata(cached);
   return {
     content: [{ type: "text" as const, text: `Displaying local image preview: ${cached.name}` }],
-    structuredContent: { ...metadata, preview_id: cached.previewId, image_content_key: imageContentKey(value) },
+    structuredContent: {
+      ...metadata,
+      preview_id: cached.previewId,
+      image_content_key: contentKey,
+      already_presented: alreadyPresented,
+    },
     _meta: {
       webgpt_image_preview: cachedMetadata,
     },
@@ -363,8 +376,8 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       terminal_event: z.string().nullable(), final_message: z.string().nullable(), error: z.string().nullable(),
       mutation_seen: z.boolean(), event_count: z.number().int().nonnegative(),
       image_artifacts: z.array(z.string()), image_preview_rendered: z.boolean(), image_content_returned: z.boolean(),
-      image_preview_recommended: z.boolean(), image_preview_path: z.string().nullable(),
-      image_preview_content_key: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+      image_preview_recommended: z.boolean(), image_preview_already_presented: z.boolean(),
+      image_preview_path: z.string().nullable(), image_preview_content_key: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
       image_preview_error: z.string().nullable(), image_preview_id: z.string().uuid().nullable(),
       session_policy: compactPolicySchema,
     },
@@ -378,7 +391,9 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     const job = jobs.get(job_id);
     let preview: Awaited<ReturnType<DirectToolService["readForTransfer"]>> | undefined;
     let previewError: string | null = null;
-    const previewPath = job.status === "completed" ? job.imageArtifacts?.[0] : undefined;
+    const recommendedImageArtifacts = job.recommendedImageArtifacts
+      ?? (job.wantsImagePreview ? (job.imageArtifacts ?? []).slice(0, 1) : []);
+    const previewPath = job.status === "completed" ? recommendedImageArtifacts[0] : undefined;
     if (previewPath) {
       try {
         preview = await direct.readForTransfer(previewPath, job.cwd, job.sandbox, 1, 1_500_000);
@@ -386,9 +401,14 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
         previewError = error instanceof Error ? error.message : String(error);
       }
     }
-    const imageContentReturned = Boolean(preview && "data" in preview);
+    const imageAvailable = Boolean(preview && "data" in preview);
     const imagePreviewPath = preview && "data" in preview ? preview.path : null;
     const imagePreviewContentKey = preview && "data" in preview ? imageContentKey(preview) : null;
+    const existingPresentation = imagePreviewContentKey
+      ? jobs.store.imagePreviewPresentation(job.webSessionId, imagePreviewContentKey)
+      : undefined;
+    const imagePreviewAlreadyPresented = Boolean(existingPresentation);
+    const imageContentReturned = imageAvailable && !imagePreviewAlreadyPresented;
     return lunaStatusResult({
       web_session_id: job.webSessionId,
       job_id: job.id, status: job.status, luna_session_id: job.lunaSessionId ?? null,
@@ -396,10 +416,10 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
       image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: false, image_content_returned: imageContentReturned,
-      image_preview_recommended: imageContentReturned, image_preview_path: imagePreviewPath,
-      image_preview_content_key: imagePreviewContentKey,
+      image_preview_recommended: imageContentReturned, image_preview_already_presented: imagePreviewAlreadyPresented,
+      image_preview_path: imagePreviewPath, image_preview_content_key: imagePreviewContentKey,
       image_preview_error: previewError,
-    }, preview);
+    }, imageContentReturned ? preview : undefined);
   });
 
   server.registerTool("codexluna_cancel", {
@@ -505,13 +525,17 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_image_preview", {
     title: "Display a local image inline",
-    description: "Render a PNG, JPEG, GIF, or WebP file as a visible inline image card in the ChatGPT conversation. Large or high-resolution images are automatically downscaled and encoded as a compact WebP preview without modifying the local file. Use this tool when the user asks to see an image and automatically when codexluna_status returns image_preview_recommended=true. Do not repeat a preview when a prior successful file_image_preview result already has the same image_content_key. The resolved path and disclosed workspace are checked unless full access is selected.",
-    inputSchema: { path: z.string().min(1), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write"), max_image_bytes: z.number().int().min(50_000).max(20_000_000).default(1_500_000) },
+    description: "Render a PNG, JPEG, GIF, or WebP file as a visible inline image card in the ChatGPT conversation. Large or high-resolution images are automatically downscaled and encoded as a compact WebP preview without modifying the local file. When codexluna_status recommends a preview, pass its web_session_id and image_preview_content_key as expected_image_content_key so the runtime can enforce exactly-once automatic presentation. Direct user-requested previews may omit those claim fields. The resolved path and disclosed workspace are checked unless full access is selected.",
+    inputSchema: {
+      path: z.string().min(1), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write"),
+      max_image_bytes: z.number().int().min(50_000).max(20_000_000).default(1_500_000),
+      web_session_id: sessionId.optional(), expected_image_content_key: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    },
     outputSchema: {
       path: z.string(), mime_type: z.string(), bytes: z.number().int().nonnegative(), optimized: z.boolean().optional(),
       source_bytes: z.number().int().nonnegative().optional(), source_mime_type: z.string().optional(),
       width: z.number().int().nonnegative().optional(), height: z.number().int().nonnegative().optional(),
-      preview_id: z.string().uuid(), image_content_key: z.string().regex(/^[a-f0-9]{64}$/),
+      preview_id: z.string().uuid(), image_content_key: z.string().regex(/^[a-f0-9]{64}$/), already_presented: z.boolean(),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: {
@@ -522,10 +546,43 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       "openai/toolInvocation/invoking": "Preparing image preview",
       "openai/toolInvocation/invoked": "Image preview ready",
     },
-  }, async input => fileImagePreviewResult(
-    await direct.readForTransfer(input.path, input.workspace_path, input.permission_mode, 1, input.max_image_bytes),
-    imagePreviews,
-  ));
+  }, async (input, extra) => {
+    const value = await direct.readForTransfer(input.path, input.workspace_path, input.permission_mode, 1, input.max_image_bytes);
+    if (!("data" in value)) throw new Error(`Local file is not a supported image: ${value.path}`);
+    const contentKey = imageContentKey(value);
+    if (input.expected_image_content_key && input.expected_image_content_key !== contentKey) {
+      throw new Error("The recommended image changed before it could be presented; poll codexluna_status again");
+    }
+
+    const resolvedSessionId = optionalConversationSessionId(input.web_session_id, extra._meta);
+    const binding = resolvedSessionId ? jobs.store.binding(resolvedSessionId) : undefined;
+    if (input.expected_image_content_key && (!resolvedSessionId || !binding)) {
+      throw new Error("Automatic image preview requires the web_session_id returned by codexluna_status");
+    }
+
+    const existingPresentation = resolvedSessionId
+      ? jobs.store.imagePreviewPresentation(resolvedSessionId, contentKey)
+      : undefined;
+    if (input.expected_image_content_key && existingPresentation) {
+      throw new Error("This recommended image was already presented in the current web session");
+    }
+
+    let cached: CachedImagePreview | undefined;
+    let alreadyPresented = false;
+    if (existingPresentation) {
+      try {
+        cached = imagePreviews.get(existingPresentation.previewId);
+        alreadyPresented = true;
+      } catch {
+        // The bounded cache may expire independently from session history. Recreate only for an explicit preview call.
+      }
+    }
+    cached ??= imagePreviews.put(value);
+    if (resolvedSessionId && binding) {
+      jobs.store.markImagePreviewPresented(resolvedSessionId, contentKey, cached.previewId);
+    }
+    return fileImagePreviewResult(value, cached, contentKey, alreadyPresented);
+  });
 
   server.registerTool("file_image_preview_restore", {
     title: "Restore a local image preview",

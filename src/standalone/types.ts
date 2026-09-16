@@ -2,6 +2,12 @@ export type LunaSandbox = "read-only" | "workspace-write" | "danger-full-access"
 export type LunaReasoning = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type LunaJobStatus = "queued" | "running" | "completed" | "failed" | "timed_out" | "cancelled";
 
+export interface ImagePreviewPresentation {
+  contentKey: string;
+  previewId: string;
+  presentedAt: string;
+}
+
 export interface LunaSessionBinding {
   webSessionId: string;
   lunaSessionId?: string;
@@ -15,6 +21,7 @@ export interface LunaSessionBinding {
   createdAt: string;
   updatedAt: string;
   lastJobId?: string;
+  imagePreviewPresentations?: ImagePreviewPresentation[];
 }
 
 export interface LunaJob {
@@ -23,6 +30,7 @@ export interface LunaJob {
   promptChars: number;
   wantsImagePreview?: boolean;
   imageArtifacts?: string[];
+  recommendedImageArtifacts?: string[];
   cwd: string;
   model: string;
   reasoning: LunaReasoning;

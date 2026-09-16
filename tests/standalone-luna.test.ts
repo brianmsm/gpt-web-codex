@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -159,7 +159,58 @@ test("Luna records user-relevant image artifacts without requiring explicit prev
     await eventually(() => manager.get(job.id).status === "completed");
     expect(manager.get(job.id).wantsImagePreview).toBe(false);
     expect(manager.get(job.id).imageArtifacts).toEqual([imagePath, intermediatePath]);
+    expect(manager.get(job.id).recommendedImageArtifacts).toEqual([imagePath]);
     expect(manager.get(job.id).finalMessage).toContain(imagePath);
+    manager.shutdown();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Luna keeps intermediate images out of automatic preview recommendations", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-luna-intermediate-image-"));
+  const intermediatePath = join(root, "intermediate.png");
+  writeFileSync(intermediatePath, Buffer.from("intermediate"));
+  try {
+    const manager = new LunaJobManager(new LunaStateStore(join(root, "state.json")), (_command, _args, cwd) => {
+      const events = [
+        { type: "item.completed", item: { type: "command_execution", aggregated_output: `FullName : ${intermediatePath}` } },
+        { type: "item.completed", item: { type: "agent_message", text: "Analysis complete; no user-relevant image to present." } },
+        { type: "turn.completed" },
+      ];
+      const script = `process.stdin.resume();${events.map(event => `console.log(${JSON.stringify(JSON.stringify(event))});`).join("")}process.exitCode=0;`;
+      return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    }, join(root, "logs"), process.execPath);
+    const job = manager.start({ webSessionId: "intermediate-session-123", prompt: "Analyze the results", cwd: root });
+    await eventually(() => manager.get(job.id).status === "completed");
+    expect(manager.get(job.id).wantsImagePreview).toBe(false);
+    expect(manager.get(job.id).imageArtifacts).toEqual([intermediatePath]);
+    expect(manager.get(job.id).recommendedImageArtifacts).toEqual([]);
+    manager.shutdown();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit image requests may fall back to an observed image when the final message omits its path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-luna-explicit-image-"));
+  const imagePath = join(root, "requested.png");
+  writeFileSync(imagePath, Buffer.from("requested"));
+  try {
+    const manager = new LunaJobManager(new LunaStateStore(join(root, "state.json")), (_command, _args, cwd) => {
+      const events = [
+        { type: "item.completed", item: { type: "command_execution", aggregated_output: `FullName : ${imagePath}` } },
+        { type: "item.completed", item: { type: "agent_message", text: "The requested image is ready." } },
+        { type: "turn.completed" },
+      ];
+      const script = `process.stdin.resume();${events.map(event => `console.log(${JSON.stringify(JSON.stringify(event))});`).join("")}process.exitCode=0;`;
+      return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    }, join(root, "logs"), process.execPath);
+    const job = manager.start({ webSessionId: "explicit-image-session-123", prompt: "Show me the generated image", cwd: root });
+    await eventually(() => manager.get(job.id).status === "completed");
+    expect(manager.get(job.id).wantsImagePreview).toBe(true);
+    expect(manager.get(job.id).imageArtifacts).toEqual([imagePath]);
+    expect(manager.get(job.id).recommendedImageArtifacts).toEqual([imagePath]);
     manager.shutdown();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -383,7 +434,8 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("Do not proactively write, update, merge, synchronize, or migrate this conversation's content");
     expect(client.getInstructions()).toContain("Do not require a confirmation keyword");
     expect(client.getInstructions()).toContain("automatically call file_image_preview exactly once");
-    expect(client.getInstructions()).toContain("Repeated codexluna_status polling must never create duplicate preview cards");
+    expect(client.getInstructions()).toContain("expected_image_content_key=image_preview_content_key");
+    expect(client.getInstructions()).toContain("rejects a duplicate automatic claim");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
@@ -642,6 +694,42 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
   }
 });
 
+test("completed Luna status does not recommend an intermediate-only image", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-luna-intermediate-status-"));
+  const statePath = join(root, "state.json");
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const imagePath = join(root, "intermediate.png");
+  writeFileSync(imagePath, image);
+  const storedJob = {
+    ...sampleJob(root), id: "33333333-3333-4333-8333-333333333333", status: "completed" as const,
+    sandbox: "read-only" as const, wantsImagePreview: false, imageArtifacts: [imagePath], recommendedImageArtifacts: [],
+    finalMessage: "Analysis complete; no user-relevant image to present.", terminalEvent: "turn.completed",
+  };
+  const store = new LunaStateStore(statePath);
+  store.initializeBinding(storedJob.webSessionId, {
+    workspacePath: root, permissionMode: "read-only", model: "gpt-5.6-luna", reasoning: "high",
+    fast: true, timeoutMs: 900_000, sessionPolicyVersion: 1,
+  });
+  store.putJob(storedJob);
+  const client = new Client({ name: "webgpt-luna-intermediate-status-test", version: "1.0.0" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
+    }));
+    const output = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    expect(output.isError).not.toBe(true);
+    expect(output.structuredContent).toMatchObject({
+      image_artifacts: [imagePath], image_content_returned: false, image_preview_recommended: false,
+      image_preview_already_presented: false, image_preview_path: null, image_preview_content_key: null, image_preview_error: null,
+    });
+    expect((output.content as Array<{ type: string }>).some(item => item.type === "image")).toBe(false);
+    expect(existsSync(join(root, "image-previews"))).toBe(false);
+  } finally {
+    await client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("completed Luna image status returns native image content without binding inline preview UI", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-luna-image-status-"));
   const statePath = join(root, "state.json");
@@ -649,7 +737,8 @@ test("completed Luna image status returns native image content without binding i
   const imagePath = join(root, "luna-preview.png");
   writeFileSync(imagePath, image);
   const storedJob = { ...sampleJob(root), id: "44444444-4444-4444-8444-444444444444", status: "completed" as const,
-    sandbox: "read-only" as const, wantsImagePreview: false, imageArtifacts: [imagePath], finalMessage: `Found ${imagePath}`, terminalEvent: "turn.completed" };
+    sandbox: "read-only" as const, wantsImagePreview: false, imageArtifacts: [imagePath], recommendedImageArtifacts: [imagePath],
+    finalMessage: `Found ${imagePath}`, terminalEvent: "turn.completed" };
   const store = new LunaStateStore(statePath);
   store.initializeBinding(storedJob.webSessionId, {
     workspacePath: root, permissionMode: "read-only", model: "gpt-5.6-luna", reasoning: "high",
@@ -676,7 +765,8 @@ test("completed Luna image status returns native image content without binding i
     expect(output.structuredContent).toMatchObject({
       status: "completed", workspace_path: root, permission_mode: "read-only",
       image_artifacts: [imagePath], image_preview_rendered: false, image_content_returned: true,
-      image_preview_recommended: true, image_preview_path: imagePath, image_preview_error: null,
+      image_preview_recommended: true, image_preview_already_presented: false,
+      image_preview_path: imagePath, image_preview_error: null,
     });
     const statusContent = output.structuredContent as {
       image_preview_id: string | null;
@@ -700,10 +790,50 @@ test("completed Luna image status returns native image content without binding i
     expect(MCP_SERVER_INSTRUCTIONS).toContain("image_preview_content_key");
     const rendered = await client.callTool({
       name: "file_image_preview",
-      arguments: { path: imagePath, workspace_path: root, permission_mode: "read-only" },
+      arguments: {
+        path: imagePath, workspace_path: root, permission_mode: "read-only",
+        web_session_id: storedJob.webSessionId, expected_image_content_key: statusContent.image_preview_content_key,
+      },
     });
     expect(rendered.isError).not.toBe(true);
-    expect((rendered.structuredContent as { image_content_key: string }).image_content_key).toBe(statusContent.image_preview_content_key);
+    const renderedContent = rendered.structuredContent as {
+      image_content_key: string; preview_id: string; already_presented: boolean;
+    };
+    expect(renderedContent.image_content_key).toBe(statusContent.image_preview_content_key);
+    expect(renderedContent.already_presented).toBe(false);
+    expect(readdirSync(join(root, "image-previews"))).toHaveLength(1);
+    expect(new LunaStateStore(statePath).binding(storedJob.webSessionId)?.imagePreviewPresentations).toMatchObject([{
+      contentKey: statusContent.image_preview_content_key, previewId: renderedContent.preview_id,
+    }]);
+
+    const statusAfterPresentation = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    expect(statusAfterPresentation.isError).not.toBe(true);
+    expect(statusAfterPresentation.structuredContent).toMatchObject({
+      image_content_returned: false, image_preview_recommended: false, image_preview_already_presented: true,
+      image_preview_path: imagePath, image_preview_content_key: statusContent.image_preview_content_key,
+    });
+    expect((statusAfterPresentation.content as Array<{ type: string }>).some(item => item.type === "image")).toBe(false);
+
+    const duplicateAutomatic = await client.callTool({
+      name: "file_image_preview",
+      arguments: {
+        path: imagePath, workspace_path: root, permission_mode: "read-only",
+        web_session_id: storedJob.webSessionId, expected_image_content_key: statusContent.image_preview_content_key,
+      },
+    });
+    expect(duplicateAutomatic.isError).toBe(true);
+    expect(JSON.stringify(duplicateAutomatic.content)).toContain("already presented");
+    expect(readdirSync(join(root, "image-previews"))).toHaveLength(1);
+
+    const repeatedExplicit = await client.callTool({
+      name: "file_image_preview",
+      arguments: { path: imagePath, workspace_path: root, permission_mode: "read-only", web_session_id: storedJob.webSessionId },
+    });
+    expect(repeatedExplicit.isError).not.toBe(true);
+    expect(repeatedExplicit.structuredContent).toMatchObject({
+      preview_id: renderedContent.preview_id, image_content_key: statusContent.image_preview_content_key, already_presented: true,
+    });
+    expect(readdirSync(join(root, "image-previews"))).toHaveLength(1);
   } finally {
     await client.close();
     rmSync(root, { recursive: true, force: true });

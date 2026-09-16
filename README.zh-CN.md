@@ -46,7 +46,8 @@ OpenAI Tunnel → 本机独立 MCP 运行时
 
 - ChatGPT 需要检查本机图片内容时使用 `file_read`，图片会作为原生 MCP 图片内容传输。
 - 需要让图片同时显示在网页对话中时使用 `file_image_preview`，它会创建可见图片卡片。
-- 当已完成的 `codexluna_status` 返回 `image_preview_recommended: true` 时，ChatGPT 应对 `image_preview_path` 自动调用一次 `file_image_preview`；status 本身绝不挂载 UI。`image_preview_content_key` 与 `file_image_preview` 返回的 `image_content_key` 对应，因此重复轮询不会重复展示同一内容。自动展示默认只限 status 推荐的一张图；其他图片仅在用户明确要求或确有必要时展示。
+- Luna 会把所有已验证图片路径保留在 `image_artifacts` 中，但自动展示只选择 Luna 最终回答中明确引用的图片；如果用户本来就明确要求查看图片、而最终消息漏写了路径，则可以回退到首个已验证的已观察图片。普通非图片请求中的纯中间图片不会自动展示。
+- 当已完成的 `codexluna_status` 返回 `image_preview_recommended: true` 时，ChatGPT 会对 `image_preview_path` 调用一次 `file_image_preview`，并传入 `web_session_id` 以及 `expected_image_content_key=image_preview_content_key`；status 本身绝不挂载 UI。成功展示后，运行时会在当前 web session 的有界状态中记录 content key 与 preview ID；后续轮询会返回 `image_preview_already_presented: true`、停止再次推荐该内容，并且不再重复发送原生图片。重复的自动 claim 会在创建新缓存项之前被拒绝；用户明确要求再次查看时则可复用已有 preview ID。
 - 图片卡片首次成功显示后，只会通过该卡片自己的 `window.openai.widgetState` 持久化不透明的预览 ID 和少量元数据；不再使用会话级 `localStorage`/`sessionStorage` 预览账本。图片数据仍保存在有数量和时间限制的本机私有缓存中。
 - 页面刷新或重新打开同一对话时，组件会用该 ID 调用私有工具 `file_image_preview_restore`，不会重新读取任意源文件路径。
 - 在刷新恢复格式加入之前创建的旧卡片无法追溯修复，需要重新调用一次 `file_image_preview` 创建可恢复的新卡片。

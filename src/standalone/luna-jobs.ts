@@ -112,6 +112,7 @@ export class LunaJobManager {
       promptChars: prompt.length,
       wantsImagePreview: requestedImagePreview(prompt),
       imageArtifacts: [],
+      recommendedImageArtifacts: [],
       cwd,
       model: input.model?.trim() || "gpt-5.6-luna",
       reasoning: input.reasoning ?? "low",
@@ -246,7 +247,11 @@ export class LunaJobManager {
     const finalImageArtifacts = finalMessage
       ? imagePaths(finalMessage).filter(path => existsSync(path) && statSync(path).isFile())
       : [];
-    const orderedImageArtifacts = [...new Set([...finalImageArtifacts, ...imageArtifacts])];
+    const observedImageArtifacts = [...imageArtifacts];
+    const orderedImageArtifacts = [...new Set([...finalImageArtifacts, ...observedImageArtifacts])];
+    const recommendedImageArtifacts = finalImageArtifacts.length > 0
+      ? [...new Set(finalImageArtifacts)]
+      : queued.wantsImagePreview ? observedImageArtifacts.slice(0, 1) : [];
     this.store.updateJob(jobId, {
       status,
       finishedAt: new Date().toISOString(),
@@ -254,6 +259,7 @@ export class LunaJobManager {
       terminalEvent: timedOut ? "timeout" : terminalEvent,
       finalMessage,
       imageArtifacts: orderedImageArtifacts,
+      recommendedImageArtifacts,
       lunaSessionId,
       mutationSeen,
       eventCount,

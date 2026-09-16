@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
-import type { LunaJob, LunaReasoning, LunaSandbox, LunaSessionBinding, LunaState } from "./types";
+import type { ImagePreviewPresentation, LunaJob, LunaReasoning, LunaSandbox, LunaSessionBinding, LunaState } from "./types";
 
 export interface InitializeSessionBindingInput {
   workspacePath: string;
@@ -78,6 +78,20 @@ export class LunaStateStore {
     binding.lunaSessionId = lunaSessionId;
     binding.updatedAt = new Date().toISOString();
     this.save();
+  }
+
+  imagePreviewPresentation(webSessionId: string, contentKey: string): ImagePreviewPresentation | undefined {
+    return this.binding(webSessionId)?.imagePreviewPresentations?.find(item => item.contentKey === contentKey);
+  }
+
+  markImagePreviewPresented(webSessionId: string, contentKey: string, previewId: string, maxEntries = 128): ImagePreviewPresentation {
+    const binding = this.ensureBinding(webSessionId);
+    const presentation = { contentKey, previewId, presentedAt: new Date().toISOString() };
+    const remaining = (binding.imagePreviewPresentations ?? []).filter(item => item.contentKey !== contentKey);
+    binding.imagePreviewPresentations = [presentation, ...remaining].slice(0, maxEntries);
+    binding.updatedAt = presentation.presentedAt;
+    this.save();
+    return presentation;
   }
 
   putJob(job: LunaJob): void {
