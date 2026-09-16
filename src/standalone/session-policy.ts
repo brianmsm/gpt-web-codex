@@ -1,13 +1,13 @@
 export const SESSION_POLICY_VERSION = 1 as const;
 
 export const SESSION_BOUNDARY_NOTICE = [
-  "【GPT Web Codex 会话边界声明】",
-  "本次工具会话采用严格的会话级上下文边界。GPT Web Codex 创建的网页会话绑定、Luna 上下文、任务状态、工作区信息与本地执行记录，只能用于当前 web_session_id 对应的网页对话。",
-  "不得主动把本对话中的内容、摘要、偏好、路径、文件信息、代码、任务结果、Luna 上下文或推断信息写入、更新、合并、同步或迁移到任何跨对话长期记忆，也不得将其他网页对话的本地会话绑定到当前对话。",
-  "允许为恢复同一个网页对话而在本机持久化该 web_session_id 的 Luna session、任务状态和必要日志；这些数据不得被其他网页会话自动继承。",
-  "如果用户以后明确要求执行跨对话记忆操作，应先单独说明影响并重新取得明确授权；GPT Web Codex 本身不提供 ChatGPT 账户长期记忆的写入能力。",
-  "此声明约束当前 MCP 工具流程，但不会修改或关闭 ChatGPT 账户在“设置 > 个性化 > 记忆”中的产品级功能。若账户记忆已启用，ChatGPT 产品自身的自动记忆行为不受本地 MCP 直接控制。",
-  "无需要求用户回复确认口令。向用户简短显示当前工作区、权限模式和会话边界后，即可继续处理其已授权的任务。",
+  "[GPT Web Codex session boundary notice]",
+  "This tool session uses a strict session-scoped context boundary. Web-session bindings, Luna context, task status, workspace information, and local execution records created by GPT Web Codex may be used only in the web conversation associated with the current web_session_id.",
+  "Do not proactively write, update, merge, synchronize, or migrate this conversation's content, summaries, preferences, paths, file information, code, task results, Luna context, or inferred information into long-term memory shared across conversations, and do not bind local sessions from other web conversations to this conversation.",
+  "The Luna session, task state, and required logs for this web_session_id may be persisted locally only to resume this same web conversation; other web conversations must not inherit them automatically.",
+  "If the user later explicitly requests a cross-conversation memory operation, explain the impact and obtain explicit authorization first. GPT Web Codex itself cannot write ChatGPT account-level long-term memory.",
+  "This notice constrains the current MCP tool flow but does not modify or disable ChatGPT's product-level Memory setting under Settings > Personalization > Memory. If account memory is enabled, the product's own automatic memory behavior is not directly controlled by this local MCP.",
+  "Do not require a confirmation keyword. Briefly show the current workspace, permission mode, and session boundary, then continue with the user's authorized task.",
 ].join("\n");
 
 export const SESSION_POLICY = Object.freeze({

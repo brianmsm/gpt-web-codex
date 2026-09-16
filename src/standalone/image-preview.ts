@@ -1,5 +1,6 @@
-export const IMAGE_PREVIEW_RESOURCE_URI = "ui://webgpt-luna/image-preview-v13.html";
+export const IMAGE_PREVIEW_RESOURCE_URI = "ui://webgpt-luna/image-preview-v14.html";
 export const LEGACY_IMAGE_PREVIEW_RESOURCE_URIS = [
+  "ui://webgpt-luna/image-preview-v13.html",
   "ui://webgpt-luna/image-preview-v12.html",
   "ui://webgpt-luna/image-preview-v11.html",
   "ui://webgpt-luna/image-preview-v10.html",
@@ -10,7 +11,7 @@ export const LEGACY_IMAGE_PREVIEW_RESOURCE_URIS = [
 export const IMAGE_PREVIEW_MIME_TYPE = "text/html;profile=mcp-app";
 
 export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -33,12 +34,12 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
 </head>
 <body>
   <main id="card" class="card" hidden>
-    <div class="stage"><img id="preview" alt="本地图片预览"></div>
+    <div class="stage"><img id="preview" alt="Local image preview"></div>
     <div class="meta"><span id="name" class="name"></span><span id="detail" class="detail"></span></div>
   </main>
   <div id="status" class="status">
     <div id="statusText">Preparing image preview...</div>
-    <button id="retry" class="retry" type="button" hidden>重新加载图片</button>
+    <button id="retry" class="retry" type="button" hidden>Reload image</button>
   </div>
   <script>
     (() => {
@@ -257,13 +258,13 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
       const showRestoring = () => {
         if (renderedPreviewId === ownedPreviewId) return;
         status.hidden = false;
-        statusText.textContent = "正在恢复图片预览…";
+        statusText.textContent = "Restoring image preview...";
         retry.hidden = true;
       };
       const showRestoreError = (error) => {
         if (renderedPreviewId === ownedPreviewId) return;
         status.hidden = false;
-        statusText.textContent = "图片预览恢复失败：" + (error?.message || String(error));
+        statusText.textContent = "Image preview restore failed: " + (error?.message || String(error));
         retry.hidden = !ownedPreviewId;
         retry.disabled = false;
       };
@@ -292,10 +293,10 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
           const result = await callRestoreTool(previewId);
           const image = extractPreview(result, previewId);
           if (!image?.data_url || image.preview_id !== previewId) {
-            throw new Error("本地缓存没有返回当前卡片的可显示图片");
+            throw new Error("The local cache did not return a displayable image for this card");
           }
           if (!isSameRenderedImage(image) && !renderImage(image)) {
-            throw new Error("本地缓存没有返回当前卡片的可显示图片");
+            throw new Error("The local cache did not return a displayable image for this card");
           }
         } catch (error) {
           if (ownedPreviewId === previewId && renderedPreviewId !== previewId) {
@@ -345,8 +346,8 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
         }
         if (!ownedPreviewId) {
           const legacyJob = hostSources(globals).map(source => findJobStatus(source.value)).find(Boolean);
-          if (legacyJob?.status === "completed") statusText.textContent = "任务已完成，但没有返回可显示的图片。";
-          else if (legacyJob?.status) statusText.textContent = "Luna 任务状态：" + legacyJob.status + "，正在等待图片产物…";
+          if (legacyJob?.status === "completed") statusText.textContent = "Task completed, but no displayable image was returned.";
+          else if (legacyJob?.status) statusText.textContent = "Luna task status: " + legacyJob.status + "; waiting for an image artifact...";
         }
         if (ownedPreviewId && renderedPreviewId !== ownedPreviewId && restoreState === "idle") void restoreOwnedPreview();
         return foundOwnPreview;
@@ -367,7 +368,7 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
         renderedDataUrl = null;
         restoreState = "failed";
         card.hidden = true;
-        showRestoreError(new Error("图片数据无法解码"));
+        showRestoreError(new Error("Image data could not be decoded"));
       });
       preview.addEventListener("load", () => {
         try { window.openai?.notifyIntrinsicHeight?.(); } catch {}
@@ -403,7 +404,7 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
         if (ownedPreviewId && renderedPreviewId !== ownedPreviewId && (shouldRestore || restoreState === "idle")) {
           void restoreOwnedPreview();
         } else if (!ownedPreviewId) {
-          statusText.textContent = "当前工具结果没有可显示的图片。";
+          statusText.textContent = "The current tool result has no displayable image.";
         }
       };
 

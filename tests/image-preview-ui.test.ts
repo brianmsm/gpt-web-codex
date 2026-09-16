@@ -161,11 +161,15 @@ function previewToolResult(previewId: string, name = "preview.png", dataUrl = "d
   };
 }
 
-test("image preview lifecycle uses a new v13 resource while keeping v12 and older resources addressable", () => {
-  expect(IMAGE_PREVIEW_RESOURCE_URI).toBe("ui://webgpt-luna/image-preview-v13.html");
+test("image preview lifecycle uses a new v14 resource while keeping v13 and older resources addressable", () => {
+  expect(IMAGE_PREVIEW_RESOURCE_URI).toBe("ui://webgpt-luna/image-preview-v14.html");
+  expect(LEGACY_IMAGE_PREVIEW_RESOURCE_URIS).toContain("ui://webgpt-luna/image-preview-v13.html");
   expect(LEGACY_IMAGE_PREVIEW_RESOURCE_URIS).toContain("ui://webgpt-luna/image-preview-v12.html");
   expect(IMAGE_PREVIEW_HTML).not.toContain("localStorage");
   expect(IMAGE_PREVIEW_HTML).not.toContain("sessionStorage");
+  expect(IMAGE_PREVIEW_HTML).toContain('<html lang="en">');
+  expect(IMAGE_PREVIEW_HTML).toContain("Reload image");
+  expect(IMAGE_PREVIEW_HTML).not.toMatch(/[\u3400-\u9fff]/);
   expect(IMAGE_PREVIEW_HTML).toContain('name="webgpt-preview-resource"');
 });
 
@@ -276,7 +280,7 @@ test("image preview keeps the standard MCP Apps initialization fallback", async 
 test("a card without its own preview id ignores historical ledger state", async () => {
   const storage = { localStorage: createStorage(), sessionStorage: createStorage() };
   const oldLedgerKey = "webgpt-image-preview-ledger:ui://webgpt-luna/image-preview-v12.html:test-conversation";
-  const newLedgerKey = "webgpt-image-preview-ledger:ui://webgpt-luna/image-preview-v13.html:test-conversation";
+  const newLedgerKey = "webgpt-image-preview-ledger:ui://webgpt-luna/image-preview-v14.html:test-conversation";
   storage.localStorage.setItem(oldLedgerKey, JSON.stringify([PREVIEW_A, PREVIEW_B]));
   storage.localStorage.setItem(newLedgerKey, JSON.stringify([PREVIEW_C]));
 
@@ -289,7 +293,7 @@ test("a card without its own preview id ignores historical ledger state", async 
 
   expect(mounted.messages.some(message => message.method === "tools/call")).toBe(false);
   expect(mounted.elements.preview.src).toBe("");
-  expect(mounted.elements.statusText.textContent).toBe("当前工具结果没有可显示的图片。");
+  expect(mounted.elements.statusText.textContent).toBe("The current tool result has no displayable image.");
   expect(storage.localStorage.peek(oldLedgerKey)).toBe(JSON.stringify([PREVIEW_A, PREVIEW_B]));
   expect(storage.localStorage.peek(newLedgerKey)).toBe(JSON.stringify([PREVIEW_C]));
 });

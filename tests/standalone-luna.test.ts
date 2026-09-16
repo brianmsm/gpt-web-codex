@@ -380,8 +380,8 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
   try {
     await client.connect(transport);
     expect(client.getInstructions()).toContain("Use codexluna_init before the first codexluna_start");
-    expect(client.getInstructions()).toContain("不得主动把本对话中的内容");
-    expect(client.getInstructions()).toContain("无需要求用户回复确认口令");
+    expect(client.getInstructions()).toContain("Do not proactively write, update, merge, synchronize, or migrate this conversation's content");
+    expect(client.getInstructions()).toContain("Do not require a confirmation keyword");
     expect(client.getInstructions()).toContain("automatically call file_image_preview exactly once");
     expect(client.getInstructions()).toContain("Repeated codexluna_status polling must never create duplicate preview cards");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
@@ -389,6 +389,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
     expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
+    expect(client.getInstructions()).not.toMatch(/[\u3400-\u9fff]/);
     const listedTools = (await client.listTools()).tools;
     const names = listedTools.map(tool => tool.name).sort();
     expect(names).toEqual([
@@ -400,6 +401,23 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     ]);
     expect(listedTools.every(tool => tool.outputSchema && typeof tool.outputSchema === "object")).toBe(true);
     expect(listedTools.every(tool => Array.isArray(tool._meta?.securitySchemes))).toBe(true);
+    expect(listedTools.map(tool => JSON.stringify(tool._meta ?? {})).join("\n")).not.toMatch(/[\u3400-\u9fff]/);
+    expect(listedTools.find(tool => tool.name === "codexluna_status")?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Checking Luna task",
+      "openai/toolInvocation/invoked": "Luna task status updated",
+    });
+    expect(listedTools.find(tool => tool.name === "file_import_attachment")?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Importing attachment",
+      "openai/toolInvocation/invoked": "Attachment imported",
+    });
+    expect(listedTools.find(tool => tool.name === "file_image_preview")?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Preparing image preview",
+      "openai/toolInvocation/invoked": "Image preview ready",
+    });
+    expect(listedTools.find(tool => tool.name === "file_image_preview_restore")?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Restoring image preview",
+      "openai/toolInvocation/invoked": "Image preview restored",
+    });
     const herdrRead = listedTools.find(tool => tool.name === "herdr_pane_read");
     const herdrRun = listedTools.find(tool => tool.name === "herdr_pane_run");
     const herdrSend = listedTools.find(tool => tool.name === "herdr_pane_send");
@@ -574,8 +592,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
       allow_same_session_persistence: true,
       requires_acknowledgement: false,
     });
-    expect(init.session_boundary_notice).toContain("不得主动把本对话中的内容");
-    expect(init.session_boundary_notice).toContain("不会修改或关闭 ChatGPT 账户");
+    expect(init.session_boundary_notice).toContain("Do not proactively write, update, merge, synchronize, or migrate this conversation's content");
+    expect(init.session_boundary_notice).toContain("does not modify or disable ChatGPT's product-level Memory setting");
+    expect(init.session_boundary_notice).not.toMatch(/[\u3400-\u9fff]/);
     const metadataInitialized = await client.callTool({
       name: "codexluna_init",
       arguments: { workspace_path: root },

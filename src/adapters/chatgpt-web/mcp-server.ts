@@ -371,8 +371,8 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: {
       securitySchemes: noAuth,
-      "openai/toolInvocation/invoking": "正在检查 Luna 任务",
-      "openai/toolInvocation/invoked": "Luna 任务状态已更新",
+      "openai/toolInvocation/invoking": "Checking Luna task",
+      "openai/toolInvocation/invoked": "Luna task status updated",
     },
   }, async ({ job_id }) => {
     const job = jobs.get(job_id);
@@ -490,8 +490,8 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     _meta: {
       securitySchemes: noAuth,
       "openai/fileParams": ["file"],
-      "openai/toolInvocation/invoking": "正在导入附件",
-      "openai/toolInvocation/invoked": "附件已导入",
+      "openai/toolInvocation/invoking": "Importing attachment",
+      "openai/toolInvocation/invoked": "Attachment imported",
     },
   }, async input => result({ ...await importChatGptAttachment({
     file: input.file,
@@ -519,8 +519,8 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       ui: { resourceUri: IMAGE_PREVIEW_RESOURCE_URI, visibility: ["model", "app"] },
       "ui/resourceUri": IMAGE_PREVIEW_RESOURCE_URI,
       "openai/outputTemplate": IMAGE_PREVIEW_RESOURCE_URI,
-      "openai/toolInvocation/invoking": "正在准备图片预览",
-      "openai/toolInvocation/invoked": "图片预览已就绪",
+      "openai/toolInvocation/invoking": "Preparing image preview",
+      "openai/toolInvocation/invoked": "Image preview ready",
     },
   }, async input => fileImagePreviewResult(
     await direct.readForTransfer(input.path, input.workspace_path, input.permission_mode, 1, input.max_image_bytes),
@@ -543,8 +543,8 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       ui: { visibility: ["app"] },
       "openai/widgetAccessible": true,
       "openai/visibility": "private",
-      "openai/toolInvocation/invoking": "正在恢复图片预览",
-      "openai/toolInvocation/invoked": "图片预览已恢复",
+      "openai/toolInvocation/invoking": "Restoring image preview",
+      "openai/toolInvocation/invoked": "Image preview restored",
     },
   }, async ({ preview_id }) => cachedImageResult(
     imagePreviews.get(preview_id),
