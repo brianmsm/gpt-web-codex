@@ -620,7 +620,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
   }
 });
 
-test("completed Luna image status returns native image content and inline preview metadata", async () => {
+test("completed Luna image status returns native image content without binding inline preview UI", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-luna-image-status-"));
   const statePath = join(root, "state.json");
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -654,15 +654,11 @@ test("completed Luna image status returns native image content and inline previe
     expect(output.structuredContent).toMatchObject({
       status: "completed", image_artifacts: [imagePath], image_preview_rendered: true, image_preview_error: null,
     });
-    const previewId = (output.structuredContent as { image_preview_id: string }).image_preview_id;
-    expect(previewId).toMatch(/^[0-9a-f-]{36}$/);
+    expect((output.structuredContent as { image_preview_id: string | null }).image_preview_id).toBeNull();
     const content = output.content as Array<{ type: string; data?: string }>;
     expect(content.some(item => item.type === "image" && item.data === image.toString("base64"))).toBe(true);
-    expect(output._meta?.webgpt_image_preview).toEqual({
-      preview_id: previewId,
-      name: "luna-preview.png", mime_type: "image/png", bytes: image.length, width: 1, height: 1,
-      data_url: `data:image/png;base64,${image.toString("base64")}`,
-    });
+    expect(output._meta?.webgpt_image_preview).toBeUndefined();
+    expect(existsSync(join(root, "image-previews"))).toBe(false);
   } finally {
     await client.close();
     rmSync(root, { recursive: true, force: true });
@@ -737,8 +733,8 @@ test("standalone MCP file_read transmits an image content block without base64 d
       bytes: image.length,
       width: 1,
       height: 1,
-      data_url: `data:image/png;base64,${image.toString("base64")}`,
     });
+    expect(JSON.stringify(rendered)).not.toContain(image.toString("base64"));
     const restored = await client.callTool({
       name: "file_image_preview_restore",
       arguments: { preview_id: previewId },

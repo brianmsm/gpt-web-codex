@@ -1,5 +1,6 @@
-export const IMAGE_PREVIEW_RESOURCE_URI = "ui://webgpt-luna/image-preview-v12.html";
+export const IMAGE_PREVIEW_RESOURCE_URI = "ui://webgpt-luna/image-preview-v13.html";
 export const LEGACY_IMAGE_PREVIEW_RESOURCE_URIS = [
+  "ui://webgpt-luna/image-preview-v12.html",
   "ui://webgpt-luna/image-preview-v11.html",
   "ui://webgpt-luna/image-preview-v10.html",
   "ui://webgpt-luna/image-preview-v9.html",
@@ -13,6 +14,7 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="webgpt-preview-resource" content="__WEBGPT_PREVIEW_NAMESPACE__">
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
@@ -50,22 +52,25 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
       const pendingRequests = new Map();
       let nextRequestId = 1;
       let initialized = false;
-      let rendered = false;
-      let restoringPreviewId = null;
-      let pendingRestoreId = null;
-      let lastPreviewId = null;
+      let ownedPreviewId = null;
+      let renderedPreviewId = null;
+      let renderedDataUrl = null;
+      let renderedName = null;
+      let renderedMimeType = null;
+      let renderedBytes = null;
+      let renderedWidth = null;
+      let renderedHeight = null;
+      let restoreState = "idle";
+      let pendingRestore = false;
       let pendingPreviewState = null;
-      const storageNamespace = "__WEBGPT_PREVIEW_NAMESPACE__";
-      const conversationKey = (() => {
-        try {
-          const referrer = new URL(document.referrer);
-          const match = referrer.pathname.match(/\/c\/([^/?#]+)/);
-          return match?.[1] || referrer.pathname || "unknown";
-        } catch { return "unknown"; }
-      })();
-      const ledgerKey = "webgpt-image-preview-ledger:" + storageNamespace + ":" + conversationKey;
-      const claimKey = "webgpt-image-preview-claim:" + storageNamespace + ":" + conversationKey;
+      let pendingPreviewStateKey = null;
+      let lastPersistedStateKey = null;
+      let stateWriteInFlightKey = null;
+      let stateRetryTimer = null;
+      let stateRetryAttempt = 0;
 
+      const previewIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const validPreviewId = (value) => typeof value === "string" && previewIdPattern.test(value) ? value : null;
       const formatBytes = (bytes) => bytes < 1024 ? bytes + " B" : bytes < 1048576 ? (bytes / 1024).toFixed(1) + " KB" : (bytes / 1048576).toFixed(1) + " MB";
       const walk = (value, match) => {
         const seen = new Set();
@@ -83,33 +88,59 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
           else queue.push(...Object.values(item));
         }
       };
-      const findImage = (value) => walk(value, (item) => {
-        if (item.webgpt_image_preview?.data_url) return item.webgpt_image_preview;
-        if (item.type === "image" && item.data && item.mimeType) {
-          return {
-            name: "image",
-            mime_type: item.mimeType,
-            bytes: Math.floor(item.data.length * 0.75),
-            data_url: "data:" + item.mimeType + ";base64," + item.data,
-          };
-        }
+      const findPreviewRecord = (value, expectedId) => walk(value, (item) => {
+        const candidate = item.webgpt_image_preview;
+        if (!candidate || typeof candidate !== "object") return;
+        const previewId = validPreviewId(candidate.preview_id);
+        if (!previewId || (expectedId && previewId !== expectedId)) return;
+        return { ...candidate, preview_id: previewId };
       });
-      const findPreviewId = (value) => walk(value, (item) => {
-        if (typeof item.webgpt_image_preview?.preview_id === "string") return item.webgpt_image_preview.preview_id;
-        if (typeof item.preview_id === "string") return item.preview_id;
-        if (typeof item.image_preview_id === "string") return item.image_preview_id;
+      const findPreviewId = (value, expectedId) => {
+        const record = findPreviewRecord(value, expectedId);
+        if (record) return record.preview_id;
+        return walk(value, (item) => {
+          const previewId = validPreviewId(item.preview_id) || validPreviewId(item.image_preview_id);
+          if (!previewId || (expectedId && previewId !== expectedId)) return;
+          return previewId;
+        }) || null;
+      };
+      const findNativeImage = (value) => walk(value, (item) => {
+        if (item.type !== "image" || typeof item.data !== "string" || typeof item.mimeType !== "string") return;
+        return {
+          name: "image",
+          mime_type: item.mimeType,
+          bytes: Math.floor(item.data.length * 0.75),
+          data_url: "data:" + item.mimeType + ";base64," + item.data,
+        };
       });
       const findJobStatus = (value) => walk(value, (item) => {
         if (typeof item.status === "string" && typeof item.job_id === "string") return item;
       });
-      const sources = (globals) => {
-        const api = window.openai || {};
-        return {
-          globals,
-          toolResponseMetadata: api.toolResponseMetadata,
-          toolOutput: api.toolOutput,
-          widgetState: api.widgetState,
-        };
+      const extractPreview = (value, expectedId) => {
+        const matchingRecord = findPreviewRecord(value, expectedId);
+        if (matchingRecord?.data_url) return matchingRecord;
+        const previewId = matchingRecord?.preview_id || findPreviewId(value, expectedId);
+        if (!previewId) return null;
+        const anyRecord = findPreviewRecord(value, null);
+        const nativeImage = !anyRecord || anyRecord.preview_id === previewId ? findNativeImage(value) : null;
+        if (nativeImage) return { ...(matchingRecord || {}), ...nativeImage, preview_id: previewId };
+        return matchingRecord || { preview_id: previewId };
+      };
+      const previewState = (image) => ({
+        webgpt_image_preview: {
+          preview_id: image.preview_id,
+          name: image.name || "image",
+          mime_type: image.mime_type,
+          bytes: image.bytes || 0,
+          width: image.width,
+          height: image.height,
+        },
+      });
+      const stateKey = (state) => JSON.stringify(state);
+      const primePersistedState = (value) => {
+        const image = extractPreview(value, ownedPreviewId);
+        if (!image?.preview_id || image.preview_id !== ownedPreviewId) return;
+        lastPersistedStateKey = stateKey(previewState(image));
       };
       const request = (method, params) => {
         const id = nextRequestId++;
@@ -122,68 +153,89 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
           pendingRequests.set(id, { resolve, reject, timeout });
         });
       };
+      const cancelStateRetry = () => {
+        if (stateRetryTimer !== null) clearTimeout(stateRetryTimer);
+        stateRetryTimer = null;
+        stateRetryAttempt = 0;
+      };
       const flushPreviewState = () => {
         const api = window.openai;
-        if (!pendingPreviewState || typeof api?.setWidgetState !== "function") return false;
+        if (!pendingPreviewState || !pendingPreviewStateKey || stateWriteInFlightKey || typeof api?.setWidgetState !== "function") return false;
+        const state = pendingPreviewState;
+        const key = pendingPreviewStateKey;
+        const previousPersistedKey = lastPersistedStateKey;
+        pendingPreviewState = null;
+        pendingPreviewStateKey = null;
+        stateWriteInFlightKey = key;
+        lastPersistedStateKey = key;
+        let succeeded = false;
         try {
-          api.setWidgetState(pendingPreviewState);
-          pendingPreviewState = null;
+          api.setWidgetState(state);
+          succeeded = true;
           return true;
         } catch {
+          if (lastPersistedStateKey === key) lastPersistedStateKey = previousPersistedKey;
+          if (!pendingPreviewState) {
+            pendingPreviewState = state;
+            pendingPreviewStateKey = key;
+          }
           return false;
+        } finally {
+          stateWriteInFlightKey = null;
+          if (succeeded) {
+            if (pendingPreviewState) {
+              stateRetryAttempt = 0;
+              scheduleStateFlush();
+            } else {
+              cancelStateRetry();
+            }
+          }
         }
       };
-      const readLedger = () => {
-        try {
-          const value = JSON.parse(window.localStorage.getItem(ledgerKey) || "[]");
-          return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
-        } catch { return []; }
-      };
-      const rememberPreview = (previewId) => {
-        if (!previewId) return;
-        try {
-          const ledger = readLedger();
-          if (!ledger.includes(previewId)) {
-            ledger.push(previewId);
-            window.localStorage.setItem(ledgerKey, JSON.stringify(ledger.slice(-100)));
-          }
-        } catch {}
-      };
-      const claimRememberedPreview = () => {
-        const ledger = readLedger();
-        if (!ledger.length) return null;
-        try {
-          const now = Date.now();
-          let claim = JSON.parse(window.sessionStorage.getItem(claimKey) || "null");
-          if (!claim || claim.total !== ledger.length || now - claim.last_claimed_at > 1500 || claim.next_index >= ledger.length) {
-            claim = { total: ledger.length, next_index: 0, last_claimed_at: now };
-          }
-          const previewId = ledger[claim.next_index] || null;
-          claim.next_index += 1;
-          claim.last_claimed_at = now;
-          window.sessionStorage.setItem(claimKey, JSON.stringify(claim));
-          return previewId;
-        } catch { return ledger[0] || null; }
+      const scheduleStateFlush = () => {
+        if (!pendingPreviewState || stateRetryTimer !== null) return;
+        const delays = [50, 250, 1000, 2500];
+        const delay = delays[stateRetryAttempt];
+        if (delay === undefined) return;
+        stateRetryTimer = setTimeout(() => {
+          stateRetryTimer = null;
+          if (flushPreviewState()) return;
+          stateRetryAttempt += 1;
+          scheduleStateFlush();
+        }, delay);
       };
       const persistPreviewState = (image) => {
-        if (!image?.preview_id) return;
-        pendingPreviewState = {
-          webgpt_image_preview: {
-            preview_id: image.preview_id,
-            name: image.name || "image",
-            mime_type: image.mime_type,
-            bytes: image.bytes || 0,
-            width: image.width,
-            height: image.height,
-          },
-        };
-        if (flushPreviewState()) return;
-        for (const delay of [50, 250, 1000, 2500]) setTimeout(flushPreviewState, delay);
+        if (!image?.preview_id || image.preview_id !== ownedPreviewId) return;
+        const state = previewState(image);
+        const key = stateKey(state);
+        if (key === lastPersistedStateKey || key === pendingPreviewStateKey || key === stateWriteInFlightKey) return;
+        pendingPreviewState = state;
+        pendingPreviewStateKey = key;
+        if (!flushPreviewState()) scheduleStateFlush();
+      };
+      const setOwner = (previewId) => {
+        if (!previewId) return false;
+        if (!ownedPreviewId) {
+          ownedPreviewId = previewId;
+          restoreState = "idle";
+          return true;
+        }
+        return ownedPreviewId === previewId;
+      };
+      const isSameRenderedImage = (image) => {
+        const previewId = validPreviewId(image?.preview_id);
+        return Boolean(previewId
+          && renderedPreviewId === previewId
+          && renderedDataUrl === image.data_url
+          && renderedName === (image.name || "image")
+          && renderedMimeType === (image.mime_type || null)
+          && renderedBytes === (image.bytes || 0)
+          && renderedWidth === (image.width ?? null)
+          && renderedHeight === (image.height ?? null));
       };
       const renderImage = (image) => {
-        if (!image?.data_url) return false;
-        lastPreviewId = image.preview_id || lastPreviewId;
-        rememberPreview(lastPreviewId);
+        const previewId = validPreviewId(image?.preview_id);
+        if (!previewId || !image?.data_url || !setOwner(previewId) || previewId !== ownedPreviewId) return false;
         preview.src = image.data_url;
         preview.alt = "Local image preview: " + (image.name || "image");
         name.textContent = image.name || "image";
@@ -191,77 +243,129 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
         status.hidden = true;
         retry.hidden = true;
         card.hidden = false;
-        rendered = true;
+        renderedPreviewId = previewId;
+        renderedDataUrl = image.data_url;
+        renderedName = image.name || "image";
+        renderedMimeType = image.mime_type || null;
+        renderedBytes = image.bytes || 0;
+        renderedWidth = image.width ?? null;
+        renderedHeight = image.height ?? null;
+        restoreState = "rendered";
         persistPreviewState(image);
         return true;
       };
       const showRestoring = () => {
-        if (rendered) return;
+        if (renderedPreviewId === ownedPreviewId) return;
         status.hidden = false;
         statusText.textContent = "正在恢复图片预览…";
         retry.hidden = true;
       };
       const showRestoreError = (error) => {
-        if (rendered) return;
+        if (renderedPreviewId === ownedPreviewId) return;
         status.hidden = false;
         statusText.textContent = "图片预览恢复失败：" + (error?.message || String(error));
-        retry.hidden = !lastPreviewId;
+        retry.hidden = !ownedPreviewId;
         retry.disabled = false;
       };
       const callRestoreTool = async (previewId) => {
         if (typeof window.openai?.callTool === "function") {
           return await window.openai.callTool("file_image_preview_restore", { preview_id: previewId });
         }
-        try {
-          return await request("tools/call", {
-            name: "file_image_preview_restore",
-            arguments: { preview_id: previewId },
-          });
-        } catch (error) { throw error; }
+        return await request("tools/call", {
+          name: "file_image_preview_restore",
+          arguments: { preview_id: previewId },
+        });
       };
-      const restorePreview = async (previewId) => {
-        lastPreviewId = previewId;
+      const restoreOwnedPreview = async (force = false) => {
+        const previewId = ownedPreviewId;
+        if (!previewId) return;
         if (!initialized) {
-          pendingRestoreId = previewId;
+          pendingRestore = true;
           return;
         }
-        if (rendered || restoringPreviewId === previewId) return;
-        restoringPreviewId = previewId;
+        if (renderedPreviewId === previewId || restoreState === "restoring") return;
+        if (restoreState === "failed" && !force) return;
+        restoreState = "restoring";
         showRestoring();
         retry.disabled = true;
         try {
           const result = await callRestoreTool(previewId);
-          if (!renderFrom(result)) throw new Error("本地缓存没有返回可显示的图片");
+          const image = extractPreview(result, previewId);
+          if (!image?.data_url || image.preview_id !== previewId) {
+            throw new Error("本地缓存没有返回当前卡片的可显示图片");
+          }
+          if (!isSameRenderedImage(image) && !renderImage(image)) {
+            throw new Error("本地缓存没有返回当前卡片的可显示图片");
+          }
         } catch (error) {
-          showRestoreError(error);
+          if (ownedPreviewId === previewId && renderedPreviewId !== previewId) {
+            restoreState = "failed";
+            showRestoreError(error);
+          }
         } finally {
-          restoringPreviewId = null;
           retry.disabled = false;
         }
       };
-      const renderFrom = (globals) => {
-        const allSources = sources(globals);
-        const image = findImage(allSources);
-        if (renderImage(image)) return true;
-        const previewId = findPreviewId(allSources);
-        if (previewId) {
-          void restorePreview(previewId);
-          return false;
+      const consumePayload = (value, allowOwnership, persistedState = false) => {
+        const expectedId = ownedPreviewId;
+        let image = extractPreview(value, expectedId);
+        if (!image && !expectedId && allowOwnership) image = extractPreview(value, null);
+        const previewId = validPreviewId(image?.preview_id);
+        if (!previewId) return false;
+        if (!ownedPreviewId) {
+          if (!allowOwnership || !setOwner(previewId)) return false;
         }
-        const job = findJobStatus(allSources);
-        if (job?.status === "completed") statusText.textContent = "任务已完成，但没有返回可显示的图片。";
-        else if (job?.status) statusText.textContent = "Luna 任务状态：" + job.status + "，正在等待图片产物…";
-        return false;
+        if (previewId !== ownedPreviewId) return false;
+        if (persistedState) primePersistedState(value);
+        if (image.data_url) {
+          if (isSameRenderedImage(image)) return true;
+          return renderImage(image);
+        }
+        return true;
+      };
+      const hostSources = (globals) => {
+        const api = window.openai || {};
+        const hostGlobals = globals && typeof globals === "object" ? globals : {};
+        return [
+          { value: api.widgetState, persisted: true },
+          { value: hostGlobals.widgetState, persisted: true },
+          { value: api.toolResponseMetadata, persisted: false },
+          { value: hostGlobals.toolResponseMetadata, persisted: false },
+          { value: api.toolOutput, persisted: false },
+          { value: hostGlobals.toolOutput, persisted: false },
+        ];
+      };
+      const renderFrom = (globals) => {
+        const seen = new Set();
+        let foundOwnPreview = false;
+        for (const source of hostSources(globals)) {
+          if (!source.value || seen.has(source.value)) continue;
+          seen.add(source.value);
+          foundOwnPreview = consumePayload(source.value, true, source.persisted) || foundOwnPreview;
+        }
+        if (!ownedPreviewId) {
+          const legacyJob = hostSources(globals).map(source => findJobStatus(source.value)).find(Boolean);
+          if (legacyJob?.status === "completed") statusText.textContent = "任务已完成，但没有返回可显示的图片。";
+          else if (legacyJob?.status) statusText.textContent = "Luna 任务状态：" + legacyJob.status + "，正在等待图片产物…";
+        }
+        if (ownedPreviewId && renderedPreviewId !== ownedPreviewId && restoreState === "idle") void restoreOwnedPreview();
+        return foundOwnPreview;
       };
 
       retry.addEventListener("click", () => {
-        if (!lastPreviewId) return;
-        rendered = false;
+        if (!ownedPreviewId || restoreState === "restoring") return;
+        renderedPreviewId = null;
+        renderedDataUrl = null;
+        restoreState = "idle";
         card.hidden = true;
-        void restorePreview(lastPreviewId);
+        preview.src = "";
+        void restoreOwnedPreview(true);
       });
       preview.addEventListener("error", () => {
-        rendered = false;
+        if (!ownedPreviewId) return;
+        renderedPreviewId = null;
+        renderedDataUrl = null;
+        restoreState = "failed";
         card.hidden = true;
         showRestoreError(new Error("图片数据无法解码"));
       });
@@ -285,33 +389,28 @@ export const IMAGE_PREVIEW_HTML = String.raw`<!doctype html>
           else pending.resolve(message.result);
           return;
         }
-        if (message.method === "ui/notifications/tool-result") renderFrom(message.params);
+        if (message.method === "ui/notifications/tool-result") {
+          consumePayload(message.params, true);
+          if (ownedPreviewId && renderedPreviewId !== ownedPreviewId && restoreState === "idle") void restoreOwnedPreview();
+        }
       }, { passive: true });
 
       const finishStartup = () => {
         initialized = true;
         flushPreviewState();
-        const restoreId = pendingRestoreId;
-        pendingRestoreId = null;
-        if (restoreId) void restorePreview(restoreId);
-        else renderFrom();
-        setTimeout(() => {
-          if (!rendered && !restoringPreviewId && !lastPreviewId) {
-            const rememberedPreviewId = claimRememberedPreview();
-            if (rememberedPreviewId) {
-              void restorePreview(rememberedPreviewId);
-              return;
-            }
-            statusText.textContent = "图片预览数据不可用，请重新调用图片预览工具。";
-          }
-        }, 2000);
+        const shouldRestore = pendingRestore;
+        pendingRestore = false;
+        if (ownedPreviewId && renderedPreviewId !== ownedPreviewId && (shouldRestore || restoreState === "idle")) {
+          void restoreOwnedPreview();
+        } else if (!ownedPreviewId) {
+          statusText.textContent = "当前工具结果没有可显示的图片。";
+        }
       };
 
       if (window.openai) {
         renderFrom();
         finishStartup();
       } else {
-        renderFrom();
         request("ui/initialize", {
           protocolVersion: "2025-06-18",
           appCapabilities: {},

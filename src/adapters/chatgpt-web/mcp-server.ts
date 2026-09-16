@@ -156,28 +156,19 @@ function cachedImageResult(preview: CachedImagePreview, text: string) {
 function lunaStatusResult(
   value: Record<string, unknown>,
   preview: Awaited<ReturnType<DirectToolService["readForTransfer"]>> | undefined,
-  cache: ImagePreviewCache,
 ) {
-  const cached = preview && "data" in preview ? cache.put(preview) : undefined;
   const structured = {
     ...value,
-    image_preview_id: cached?.previewId ?? null,
+    image_preview_id: null,
     session_policy: COMPACT_SESSION_POLICY,
   };
-  if (!cached) return result(structured);
-  const metadata = cachedImageMetadata(cached);
+  if (!preview || !("data" in preview)) return result(structured);
   return {
     content: [
       { type: "text" as const, text: "Luna status is available in structuredContent; the image follows as native MCP content." },
-      { type: "image" as const, data: cached.data, mimeType: cached.mimeType },
+      { type: "image" as const, data: preview.data, mimeType: preview.mimeType },
     ],
     structuredContent: structured,
-    _meta: {
-      webgpt_image_preview: {
-        ...metadata,
-        data_url: `data:${cached.mimeType};base64,${cached.data}`,
-      },
-    },
   };
 }
 
@@ -205,10 +196,7 @@ function fileImagePreviewResult(
     content: [{ type: "text" as const, text: `Displaying local image preview: ${cached.name}` }],
     structuredContent: { ...metadata, preview_id: cached.previewId },
     _meta: {
-      webgpt_image_preview: {
-        ...cachedMetadata,
-        data_url: `data:${cached.mimeType};base64,${cached.data}`,
-      },
+      webgpt_image_preview: cachedMetadata,
     },
   };
 }
@@ -400,7 +388,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
       image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: imagePreviewRendered,
       image_preview_error: previewError,
-    }, preview, imagePreviews);
+    }, preview);
   });
 
   server.registerTool("codexluna_cancel", {
