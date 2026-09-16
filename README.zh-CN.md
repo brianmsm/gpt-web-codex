@@ -16,7 +16,7 @@ GPT Web Codex 是一个纯 MCP 启动器。普通 ChatGPT 网页对话负责规�
 - 同一网页会话中的 Luna 任务串行执行，不同网页会话可以独立运行。
 - 支持 `read-only`、`workspace-write` 和 `danger-full-access` 三种权限模式。
 - ChatGPT 停止回答后，长任务仍可继续执行；网页端可以查询状态或主动取消。
-- Luna 生成并验证的图片可由 `codexluna_status` 作为原生 MCP 图片内容返回供检查；只有显式调用 `file_image_preview` 才会在网页对话中创建可见预览。
+- Luna 生成并验证、且与最终回答相关的图片可由 `codexluna_status` 作为原生 MCP 图片内容返回供检查；随后 ChatGPT 会通过独立的 `file_image_preview` 调用创建一个去重后的可见卡片，即使用户没有显式要求预览该图。
 - 大图片会生成压缩预览副本，结构化工具结果不会在文本内容中重复传输。
 - ChatGPT 页面刷新后可从本机私有缓存自动恢复图片预览，不会把 Base64 放入模型可见的结构化结果。
 - 可将当前 ChatGPT 对话中上传的附件安全导入用户声明的本机工作区，再交给文件工具或 Luna 处理。
@@ -46,6 +46,7 @@ OpenAI Tunnel → 本机独立 MCP 运行时
 
 - ChatGPT 需要检查本机图片内容时使用 `file_read`，图片会作为原生 MCP 图片内容传输。
 - 需要让图片同时显示在网页对话中时使用 `file_image_preview`，它会创建可见图片卡片。
+- 当已完成的 `codexluna_status` 返回 `image_preview_recommended: true` 时，ChatGPT 应对 `image_preview_path` 自动调用一次 `file_image_preview`；status 本身绝不挂载 UI。`image_preview_content_key` 与 `file_image_preview` 返回的 `image_content_key` 对应，因此重复轮询不会重复展示同一内容。自动展示默认只限 status 推荐的一张图；其他图片仅在用户明确要求或确有必要时展示。
 - 图片卡片首次成功显示后，只会通过该卡片自己的 `window.openai.widgetState` 持久化不透明的预览 ID 和少量元数据；不再使用会话级 `localStorage`/`sessionStorage` 预览账本。图片数据仍保存在有数量和时间限制的本机私有缓存中。
 - 页面刷新或重新打开同一对话时，组件会用该 ID 调用私有工具 `file_image_preview_restore`，不会重新读取任意源文件路径。
 - 在刷新恢复格式加入之前创建的旧卡片无法追溯修复，需要重新调用一次 `file_image_preview` 创建可恢复的新卡片。

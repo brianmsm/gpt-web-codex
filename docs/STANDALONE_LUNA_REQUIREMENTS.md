@@ -29,14 +29,18 @@ Expose both tool families by default:
 ChatGPT may use direct tools for narrow operations and Luna for agentic execution. Work in one Luna
 session is serialized. Separate Web conversations may run independently.
 
-When a user asks to see a local image, a Luna message or filesystem path is not proof that the image
-was rendered. The Luna job records verified absolute image artifacts, and `codexluna_status` may
-return the first eligible artifact as native MCP image content for inspection, but it must not mount
-the image-preview UI or emit inline-preview metadata. `image_content_returned` reports whether native
-image content was included. The legacy `image_preview_rendered` field remains for compatibility but is
-always false on `codexluna_status`. A visible card is created only by explicit `file_image_preview`;
-its opaque preview ID and small metadata are persisted per card through `window.openai.widgetState`,
-never through a conversation-global local/session-storage ledger.
+When Luna creates, inspects, or relies on a local image that is materially relevant to the final
+answer, it must report the exact absolute path even when the user did not explicitly ask for a
+preview. `codexluna_status` may return the first verified user-relevant artifact as native MCP image
+content for inspection, but it must not mount image-preview UI itself. A successful transfer sets
+`image_preview_recommended=true`, returns `image_preview_path`, `permission_mode`, and a deterministic
+`image_preview_content_key`, and leaves the legacy `image_preview_rendered` field false. ChatGPT then
+calls `file_image_preview` exactly once for that recommended image. The tool returns the matching
+`image_content_key`; repeated status polling must skip a preview whose content key was already
+presented. Automatic presentation is bounded to one recommended image per completed status. Extra
+artifacts are presented only when explicitly requested or materially necessary. Each visible card's
+opaque preview ID and small metadata are persisted per card through `window.openai.widgetState`, never
+through a conversation-global local/session-storage ledger.
 
 ## Conversation and Luna session identity
 

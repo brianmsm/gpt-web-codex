@@ -56,14 +56,13 @@ function eventImagePaths(event: Record<string, unknown>): string[] {
 }
 
 function imagePreviewInstruction(prompt: string): string {
-  if (!requestedImagePreview(prompt)) return prompt;
   return [
     prompt,
     "",
-    "GPT Web Codex image handoff requirement:",
-    "- Locate and verify the requested image, but do not claim that it is displayed or previewed in ChatGPT.",
-    "- In the final answer, include the exact absolute path of every image the user should see.",
-    "- The parent MCP runtime, not this Luna process, is responsible for rendering the image in ChatGPT.",
+    "GPT Web Codex visual artifact handoff requirement:",
+    "- If you create, inspect, or rely on a local PNG, JPEG, GIF, or WebP that is materially relevant to the final answer, include its exact absolute path in the final answer even when the user did not explicitly ask to preview it.",
+    "- Omit purely transient or intermediate images that the user does not need to see.",
+    "- Do not claim that any image is displayed or previewed in ChatGPT. The parent MCP runtime, not this Luna process, is responsible for rendering user-relevant images.",
   ].join("\n");
 }
 
@@ -244,13 +243,17 @@ export class LunaJobManager {
     const current = this.get(jobId);
     if (current.status === "cancelled") return;
     const status = timedOut ? "timed_out" : outcome.code === 0 && terminalEvent === "turn.completed" ? "completed" : "failed";
+    const finalImageArtifacts = finalMessage
+      ? imagePaths(finalMessage).filter(path => existsSync(path) && statSync(path).isFile())
+      : [];
+    const orderedImageArtifacts = [...new Set([...finalImageArtifacts, ...imageArtifacts])];
     this.store.updateJob(jobId, {
       status,
       finishedAt: new Date().toISOString(),
       exitCode: outcome.code,
       terminalEvent: timedOut ? "timeout" : terminalEvent,
       finalMessage,
-      imageArtifacts: [...imageArtifacts],
+      imageArtifacts: orderedImageArtifacts,
       lunaSessionId,
       mutationSeen,
       eventCount,

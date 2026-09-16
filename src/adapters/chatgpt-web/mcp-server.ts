@@ -125,6 +125,10 @@ function imageMetadata(value: Extract<Awaited<ReturnType<DirectToolService["read
   };
 }
 
+function imageContentKey(value: Extract<Awaited<ReturnType<DirectToolService["readForTransfer"]>>, { data: string }>): string {
+  return createHash("sha256").update(value.mimeType, "utf8").update("\0").update(value.data, "utf8").digest("hex");
+}
+
 function cachedImageMetadata(preview: CachedImagePreview) {
   return {
     preview_id: preview.previewId,
@@ -194,7 +198,7 @@ function fileImagePreviewResult(
   const cachedMetadata = cachedImageMetadata(cached);
   return {
     content: [{ type: "text" as const, text: `Displaying local image preview: ${cached.name}` }],
-    structuredContent: { ...metadata, preview_id: cached.previewId },
+    structuredContent: { ...metadata, preview_id: cached.previewId, image_content_key: imageContentKey(value) },
     _meta: {
       webgpt_image_preview: cachedMetadata,
     },
@@ -351,14 +355,16 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("codexluna_status", {
     title: "Get Luna execution status",
-    description: "Poll an asynchronous Luna task. Completed results are compact; full JSONL remains in the local log. Image artifacts may be returned as native MCP image content, but visible inline preview UI is handled only by the dedicated file_image_preview tool.",
+    description: "Poll an asynchronous Luna task. Completed results are compact; full JSONL remains in the local log. The first verified user-relevant image artifact may be returned as native MCP image content and marked image_preview_recommended so ChatGPT can present it exactly once through file_image_preview. This status tool never mounts preview UI itself.",
     inputSchema: { job_id: z.string().uuid() },
     outputSchema: {
       web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus,
-      luna_session_id: z.string().nullable(), workspace_path: z.string(),
+      luna_session_id: z.string().nullable(), workspace_path: z.string(), permission_mode: sandbox,
       terminal_event: z.string().nullable(), final_message: z.string().nullable(), error: z.string().nullable(),
       mutation_seen: z.boolean(), event_count: z.number().int().nonnegative(),
       image_artifacts: z.array(z.string()), image_preview_rendered: z.boolean(), image_content_returned: z.boolean(),
+      image_preview_recommended: z.boolean(), image_preview_path: z.string().nullable(),
+      image_preview_content_key: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
       image_preview_error: z.string().nullable(), image_preview_id: z.string().uuid().nullable(),
       session_policy: compactPolicySchema,
     },
@@ -372,7 +378,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     const job = jobs.get(job_id);
     let preview: Awaited<ReturnType<DirectToolService["readForTransfer"]>> | undefined;
     let previewError: string | null = null;
-    const previewPath = job.status === "completed" && job.wantsImagePreview ? job.imageArtifacts?.[0] : undefined;
+    const previewPath = job.status === "completed" ? job.imageArtifacts?.[0] : undefined;
     if (previewPath) {
       try {
         preview = await direct.readForTransfer(previewPath, job.cwd, job.sandbox, 1, 1_500_000);
@@ -381,12 +387,17 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       }
     }
     const imageContentReturned = Boolean(preview && "data" in preview);
+    const imagePreviewPath = preview && "data" in preview ? preview.path : null;
+    const imagePreviewContentKey = preview && "data" in preview ? imageContentKey(preview) : null;
     return lunaStatusResult({
       web_session_id: job.webSessionId,
       job_id: job.id, status: job.status, luna_session_id: job.lunaSessionId ?? null,
-      workspace_path: job.cwd, terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
+      workspace_path: job.cwd, permission_mode: job.sandbox,
+      terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
       image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: false, image_content_returned: imageContentReturned,
+      image_preview_recommended: imageContentReturned, image_preview_path: imagePreviewPath,
+      image_preview_content_key: imagePreviewContentKey,
       image_preview_error: previewError,
     }, preview);
   });
@@ -494,13 +505,13 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("file_image_preview", {
     title: "Display a local image inline",
-    description: "Render a PNG, JPEG, GIF, or WebP file as a visible inline image card in the ChatGPT conversation. Large or high-resolution images are automatically downscaled and encoded as a compact WebP preview without modifying the local file. Use this presentation tool whenever the user asks to see or preview a local image. The resolved path and disclosed workspace are checked unless full access is selected.",
+    description: "Render a PNG, JPEG, GIF, or WebP file as a visible inline image card in the ChatGPT conversation. Large or high-resolution images are automatically downscaled and encoded as a compact WebP preview without modifying the local file. Use this tool when the user asks to see an image and automatically when codexluna_status returns image_preview_recommended=true. Do not repeat a preview when a prior successful file_image_preview result already has the same image_content_key. The resolved path and disclosed workspace are checked unless full access is selected.",
     inputSchema: { path: z.string().min(1), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write"), max_image_bytes: z.number().int().min(50_000).max(20_000_000).default(1_500_000) },
     outputSchema: {
       path: z.string(), mime_type: z.string(), bytes: z.number().int().nonnegative(), optimized: z.boolean().optional(),
       source_bytes: z.number().int().nonnegative().optional(), source_mime_type: z.string().optional(),
       width: z.number().int().nonnegative().optional(), height: z.number().int().nonnegative().optional(),
-      preview_id: z.string().uuid(),
+      preview_id: z.string().uuid(), image_content_key: z.string().regex(/^[a-f0-9]{64}$/),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: {

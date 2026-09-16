@@ -16,7 +16,7 @@ GPT Web Codex is a pure MCP launcher. A normal ChatGPT Web conversation is the p
 - Serializes Luna work inside one web session while allowing different web sessions to run independently.
 - Supports `read-only`, `workspace-write`, and `danger-full-access` execution modes.
 - Keeps long-running jobs alive when the ChatGPT reply finishes; jobs can be polled or cancelled explicitly.
-- Returns verified image artifacts from completed Luna jobs as native MCP image content for inspection; visible inline previews are created only by the explicit `file_image_preview` tool.
+- Returns verified user-relevant image artifacts from completed Luna jobs as native MCP image content for inspection, then directs ChatGPT to create one deduplicated visible card through `file_image_preview` even when the user did not explicitly ask to preview the graph.
 - Restores inline image previews after a ChatGPT page refresh from a bounded private local cache without copying Base64 into model-visible structured results.
 - Safely imports files uploaded to the current ChatGPT conversation into a user-disclosed local workspace for direct tools or Luna.
 
@@ -46,6 +46,7 @@ OpenAI Tunnel → standalone local MCP runtime
 
 - Use `file_read` when ChatGPT needs to inspect a local image as native MCP image content.
 - Use `file_image_preview` when the image should also appear as a visible card in the conversation.
+- When a completed `codexluna_status` returns `image_preview_recommended: true`, ChatGPT should automatically call `file_image_preview` once for `image_preview_path`. The status tool itself never mounts UI. `image_preview_content_key` matches the `image_content_key` returned by `file_image_preview`, so repeated status polling can skip content that was already presented. Automatic presentation is bounded to the single recommended image per status; additional artifacts are shown only when explicitly requested or materially necessary.
 - Each successfully rendered card persists only its opaque preview ID and small metadata through that card's `window.openai.widgetState`; there is no conversation-global `localStorage`/`sessionStorage` preview ledger. Image bytes stay in the bounded private local preview cache.
 - When ChatGPT recreates the card after a page refresh or the conversation is reopened, the component calls the private `file_image_preview_restore` tool with that ID. It never rereads an arbitrary source path.
 - Cards created before the refresh-persistence format was introduced cannot be repaired retroactively. Call `file_image_preview` once more to create a restorable card.
