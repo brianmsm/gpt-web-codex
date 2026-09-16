@@ -16,7 +16,7 @@ GPT Web Codex is a pure MCP launcher. A normal ChatGPT Web conversation is the p
 - Serializes Luna work inside one web session while allowing different web sessions to run independently.
 - Supports `read-only`, `workspace-write`, and `danger-full-access` execution modes.
 - Keeps long-running jobs alive when the ChatGPT reply finishes; jobs can be polled or cancelled explicitly.
-- Turns verified image artifacts from completed Luna jobs into native MCP image content and an inline preview instead of trusting a textual “displayed” claim.
+- Returns verified image artifacts from completed Luna jobs as native MCP image content for inspection; visible inline previews are created only by the explicit `file_image_preview` tool.
 - Restores inline image previews after a ChatGPT page refresh from a bounded private local cache without copying Base64 into model-visible structured results.
 - Safely imports files uploaded to the current ChatGPT conversation into a user-disclosed local workspace for direct tools or Luna.
 
@@ -46,10 +46,10 @@ OpenAI Tunnel → standalone local MCP runtime
 
 - Use `file_read` when ChatGPT needs to inspect a local image as native MCP image content.
 - Use `file_image_preview` when the image should also appear as a visible card in the conversation.
-- Each successfully rendered card stores only an opaque preview ID in browser storage, scoped to the current ChatGPT `/c/...` conversation. Image bytes stay in the bounded private local preview cache.
+- Each successfully rendered card persists only its opaque preview ID and small metadata through that card's `window.openai.widgetState`; there is no conversation-global `localStorage`/`sessionStorage` preview ledger. Image bytes stay in the bounded private local preview cache.
 - When ChatGPT recreates the card after a page refresh or the conversation is reopened, the component calls the private `file_image_preview_restore` tool with that ID. It never rereads an arbitrary source path.
 - Cards created before the refresh-persistence format was introduced cannot be repaired retroactively. Call `file_image_preview` once more to create a restorable card.
-- Clearing ChatGPT site data or deleting the local preview cache removes the information needed for restoration.
+- Deleting the local preview cache prevents restoration even when the card's widget state is still available; restoration also requires ChatGPT to rehydrate that card's own widget state.
 
 ## Importing ChatGPT attachments
 

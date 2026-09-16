@@ -358,7 +358,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
       luna_session_id: z.string().nullable(), workspace_path: z.string(),
       terminal_event: z.string().nullable(), final_message: z.string().nullable(), error: z.string().nullable(),
       mutation_seen: z.boolean(), event_count: z.number().int().nonnegative(),
-      image_artifacts: z.array(z.string()), image_preview_rendered: z.boolean(),
+      image_artifacts: z.array(z.string()), image_preview_rendered: z.boolean(), image_content_returned: z.boolean(),
       image_preview_error: z.string().nullable(), image_preview_id: z.string().uuid().nullable(),
       session_policy: compactPolicySchema,
     },
@@ -380,13 +380,13 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
         previewError = error instanceof Error ? error.message : String(error);
       }
     }
-    const imagePreviewRendered = Boolean(preview && "data" in preview);
+    const imageContentReturned = Boolean(preview && "data" in preview);
     return lunaStatusResult({
       web_session_id: job.webSessionId,
       job_id: job.id, status: job.status, luna_session_id: job.lunaSessionId ?? null,
       workspace_path: job.cwd, terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
-      image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: imagePreviewRendered,
+      image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: false, image_content_returned: imageContentReturned,
       image_preview_error: previewError,
     }, preview);
   });

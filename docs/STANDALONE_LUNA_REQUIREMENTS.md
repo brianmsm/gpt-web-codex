@@ -30,10 +30,13 @@ ChatGPT may use direct tools for narrow operations and Luna for agentic executio
 session is serialized. Separate Web conversations may run independently.
 
 When a user asks to see a local image, a Luna message or filesystem path is not proof that the image
-was rendered. The Luna job records verified absolute image artifacts, and `codexluna_status` returns
-the first eligible artifact as native MCP image content plus inline preview metadata. ChatGPT may say
-the image is displayed only when `image_preview_rendered` is true. Direct `file_image_preview` remains
-available when ChatGPT already knows the path.
+was rendered. The Luna job records verified absolute image artifacts, and `codexluna_status` may
+return the first eligible artifact as native MCP image content for inspection, but it must not mount
+the image-preview UI or emit inline-preview metadata. `image_content_returned` reports whether native
+image content was included. The legacy `image_preview_rendered` field remains for compatibility but is
+always false on `codexluna_status`. A visible card is created only by explicit `file_image_preview`;
+its opaque preview ID and small metadata are persisted per card through `window.openai.widgetState`,
+never through a conversation-global local/session-storage ledger.
 
 ## Conversation and Luna session identity
 

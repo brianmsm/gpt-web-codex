@@ -652,7 +652,8 @@ test("completed Luna image status returns native image content without binding i
     const output = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
     expect(output.isError).not.toBe(true);
     expect(output.structuredContent).toMatchObject({
-      status: "completed", image_artifacts: [imagePath], image_preview_rendered: true, image_preview_error: null,
+      status: "completed", image_artifacts: [imagePath], image_preview_rendered: false,
+      image_content_returned: true, image_preview_error: null,
     });
     expect((output.structuredContent as { image_preview_id: string | null }).image_preview_id).toBeNull();
     const content = output.content as Array<{ type: string; data?: string }>;
