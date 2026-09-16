@@ -363,7 +363,7 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
 
   server.registerTool("codexluna_status", {
     title: "Get Luna execution status",
-    description: "Poll an asynchronous Luna task. Completed results are compact; full JSONL remains in the local log. For an image-preview task, this tool automatically returns the first verified local image artifact as native image content and an inline preview. Do not claim an image is displayed unless image_preview_rendered is true.",
+    description: "Poll an asynchronous Luna task. Completed results are compact; full JSONL remains in the local log. Image artifacts may be returned as native MCP image content, but visible inline preview UI is handled only by the dedicated file_image_preview tool.",
     inputSchema: { job_id: z.string().uuid() },
     outputSchema: {
       web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus,
@@ -377,9 +377,6 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: {
       securitySchemes: noAuth,
-      ui: { resourceUri: IMAGE_PREVIEW_RESOURCE_URI, visibility: ["model", "app"] },
-      "ui/resourceUri": IMAGE_PREVIEW_RESOURCE_URI,
-      "openai/outputTemplate": IMAGE_PREVIEW_RESOURCE_URI,
       "openai/toolInvocation/invoking": "正在检查 Luna 任务",
       "openai/toolInvocation/invoked": "Luna 任务状态已更新",
     },

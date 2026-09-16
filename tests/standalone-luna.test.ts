@@ -644,7 +644,11 @@ test("completed Luna image status returns native image content and inline previe
   try {
     await client.connect(transport);
     const tools = await client.listTools();
-    expect(tools.tools.find(tool => tool.name === "codexluna_status")?._meta?.["openai/outputTemplate"]).toBe(IMAGE_PREVIEW_RESOURCE_URI);
+    const statusTool = tools.tools.find(tool => tool.name === "codexluna_status");
+    expect(statusTool?._meta?.["openai/outputTemplate"]).toBeUndefined();
+    expect(statusTool?._meta?.["ui/resourceUri"]).toBeUndefined();
+    expect(statusTool?._meta?.ui).toBeUndefined();
+    expect(tools.tools.find(tool => tool.name === "file_image_preview")?._meta?.["openai/outputTemplate"]).toBe(IMAGE_PREVIEW_RESOURCE_URI);
     const output = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
     expect(output.isError).not.toBe(true);
     expect(output.structuredContent).toMatchObject({
