@@ -12,7 +12,7 @@ GPT Web Codex is a pure MCP launcher. A normal ChatGPT Web conversation is the p
 
 - Uses ChatGPT in the user's normal browser; the launcher never embeds or automates ChatGPT.
 - Binds each stable ChatGPT conversation URL to one persistent Luna session.
-- Exposes asynchronous `codexluna_*` tools, direct file/terminal tools, and an optional explicit Herdr 0.8.2 bridge over MCP.
+- Exposes asynchronous `codexluna_*` tools, direct file/terminal tools, an optional explicit Herdr 0.8.2 bridge, and explicitly configured external MCP tools over MCP.
 - Serializes Luna work inside one web session while allowing different web sessions to run independently.
 - Supports `read-only`, `workspace-write`, and `danger-full-access` execution modes.
 - Keeps long-running jobs alive when the ChatGPT reply finishes; jobs can be polled or cancelled explicitly.
@@ -36,10 +36,12 @@ OpenAI Tunnel → standalone local MCP runtime
         ├─ file_import_attachment / file_read / preview / list / search / write
         ├─ file_create_directory / file_delete_directory
         ├─ terminal_exec / start / status / write_stdin / cancel
-        └─ herdr_status / workspace / worktree / tab / pane tools
-                 │                              │
-                 ▼                              ▼
-          codex exec --json (Luna)       Herdr Socket API → real PTYs
+        ├─ herdr_status / workspace / worktree / tab / pane tools
+        └─ external_mcp_status / <alias>__<remote-tool>
+                 │                 │                    │
+                 ▼                 ▼                    ▼
+          codex exec --json   Herdr Socket API    external MCP servers
+              (Luna)            → real PTYs       (stdio / Streamable HTTP)
 ```
 
 ## Image previews and page refreshes
@@ -65,6 +67,10 @@ OpenAI Tunnel → standalone local MCP runtime
 - `file_list` returns each entry's type, optional file size, and `modified_at` as an ISO 8601 timestamp.
 - `terminal_exec` runs ordinary PowerShell/sh commands and waits for bounded stdout, stderr, status, and exit code. Long-running or interactive work uses `terminal_start`, `terminal_status`, `terminal_write_stdin`, and `terminal_cancel` without rerunning the command.
 - Use `herdr_*` instead when a persistent/interactively controlled process should live in a real Herdr PTY that the user can observe in the Herdr application. The bridge uses explicit Herdr session/workspace/tab/pane IDs, requires an explicit `workspace_path`/`permission_mode` scope for operational calls, validates protocol 20 before acting, and never fabricates `HERDR_ENV`. See [Herdr bridge](docs/herdr.md).
+
+## External MCP bridge
+
+GWC can initialize explicitly configured MCP servers over stdio or Streamable HTTP before it publishes its own tool catalog. Allowed remote tools appear directly as namespaced tools such as `research__search`; arbitrary remote `_meta` is contained, stdio environment inheritance is explicit, and no external server is auto-discovered. See [External MCP bridge](docs/external-mcp.md) and [external-mcp.example.json](external-mcp.example.json).
 
 ## Linux deployment
 

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "servers": {
+    "local-app": {
+      "enabled": true,
+      "required": false,
+      "transport": "stdio",
+      "command": "/usr/bin/example-mcp",
+      "args": [],
+      "inherit_env": [
+        "PATH"
+      ],
+      "env": {},
+      "tools": {
+        "allow": [
+          "status",
+          "search"
+        ],
+        "deny": []
+      },
+      "startup_timeout_ms": 15000,
+      "call_timeout_ms": 60000
+    },
+    "research": {
+      "enabled": true,
+      "required": false,
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "tools": {
+        "allow": [
+          "search",
+          "status"
+        ]
+      }
+    }
+  }
+}
