@@ -16,6 +16,7 @@ import {
 import { LunaJobManager } from "../../standalone/luna-jobs";
 import { HerdrClient } from "../../standalone/herdr-client";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
+import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
 import {
   COMPACT_SESSION_POLICY,
   MCP_SERVER_INSTRUCTIONS,
@@ -33,6 +34,41 @@ const reasoning = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
 const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out", "cancelled"]);
 const compactPolicySchema = z.string();
 const noAuth = [{ type: "noauth" as const }];
+
+export const GWC_NATIVE_TOOL_NAMES = new Set([
+  "codexluna_init",
+  "codexluna_start",
+  "codexluna_status",
+  "codexluna_cancel",
+  "codexluna_session",
+  "file_read",
+  "file_import_attachment",
+  "file_image_preview",
+  "file_image_preview_restore",
+  "file_list",
+  "file_search",
+  "file_write",
+  "file_edit",
+  "file_apply_patch",
+  "file_create_directory",
+  "file_delete_directory",
+  "terminal_start",
+  "terminal_exec",
+  "terminal_status",
+  "terminal_write_stdin",
+  "terminal_cancel",
+  "herdr_status",
+  "herdr_workspace_open",
+  "herdr_worktree_create",
+  "herdr_tab_create",
+  "herdr_pane_split",
+  "herdr_pane_run",
+  "herdr_pane_read",
+  "herdr_pane_send",
+  "herdr_pane_wait",
+  "herdr_pane_status",
+  "external_mcp_status",
+] as const);
 
 function optionalConversationSessionId(
   explicit: string | undefined,
@@ -218,7 +254,11 @@ function fileImagePreviewResult(
   };
 }
 
-export async function runChatGptMcpServer(options: { statePath?: string; herdrClient?: HerdrClient } = {}): Promise<void> {
+export async function runChatGptMcpServer(options: {
+  statePath?: string;
+  herdrClient?: HerdrClient;
+  externalMcpConfigPath?: string;
+} = {}): Promise<void> {
   const jobs = new LunaJobManager(new LunaStateStore(options.statePath));
   const direct = new DirectToolService();
   const herdr = options.herdrClient ?? new HerdrClient();
@@ -227,13 +267,27 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
     { name: "gpt-web-codex", version: VERSION },
     { instructions: MCP_SERVER_INSTRUCTIONS },
   );
-  const shutdown = () => {
+  let externalMcp: ExternalMcpBridge | undefined;
+  let shutdownStarted = false;
+  const shutdownServices = async (): Promise<void> => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     jobs.shutdown();
     direct.shutdown();
-    setTimeout(() => process.exit(0), 0).unref?.();
+    await externalMcp?.shutdown();
+  };
+  const shutdown = () => {
+    void shutdownServices().finally(() => {
+      setTimeout(() => process.exit(0), 0).unref?.();
+    });
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  server.server.onclose = () => {
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+    void shutdownServices();
+  };
 
   registerHerdrTools(server, herdr);
 
@@ -767,9 +821,13 @@ export async function runChatGptMcpServer(options: { statePath?: string; herdrCl
   }, async ({ job_id }) => result(publicTerminal(direct.cancelTerminal(job_id))));
 
   try {
+    externalMcp = await ExternalMcpBridge.initialize({ configPath: options.externalMcpConfigPath });
+    await externalMcp.registerTools(server, GWC_NATIVE_TOOL_NAMES);
     await server.connect(new StdioServerTransport());
-  } finally {
+  } catch (error) {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
+    await shutdownServices();
+    throw error;
   }
 }
