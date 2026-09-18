@@ -443,6 +443,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
+    expect(client.getInstructions()).toContain("external MCP namespace");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
     expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
     expect(client.getInstructions()).not.toMatch(/[\u3400-\u9fff]/);
@@ -450,6 +451,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     const names = listedTools.map(tool => tool.name).sort();
     expect(names).toEqual([
       "codexluna_cancel", "codexluna_init", "codexluna_session", "codexluna_start", "codexluna_status",
+      "external_mcp_status",
       "file_apply_patch", "file_create_directory", "file_delete_directory", "file_edit", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_write",
       "herdr_pane_read", "herdr_pane_run", "herdr_pane_send", "herdr_pane_split", "herdr_pane_status", "herdr_pane_wait",
       "herdr_status", "herdr_tab_create", "herdr_workspace_open", "herdr_worktree_create",
