@@ -74,6 +74,7 @@ export interface ExternalMcpServerRuntime {
   transport?: ExternalMcpClientTransport;
   discoveredTools: Tool[];
   exposedTools: ExternalMcpPublicTool[];
+  redactionValues: string[];
   lastStartupError: string | null;
   lastRuntimeError: string | null;
   closing: boolean;

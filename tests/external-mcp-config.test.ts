@@ -6,7 +6,10 @@ import {
   loadExternalMcpConfig,
   parseExternalMcpConfig,
 } from "../src/standalone/external-mcp/config";
-import { stdioEnvironment } from "../src/standalone/external-mcp/client";
+import {
+  sanitizeExternalMcpError,
+  stdioEnvironment,
+} from "../src/standalone/external-mcp/client";
 import {
   EXTERNAL_MCP_PUBLIC_TOOL_NAME_MAX,
   externalMcpPublicToolName,
@@ -95,6 +98,34 @@ test("external MCP config parses strict stdio and HTTP servers with explicit def
   });
 });
 
+test("stdio args are preserved literally, including whitespace, empty strings, and duplicates", () => {
+  const parsed = parseExternalMcpConfig({
+    version: 1,
+    servers: {
+      literal: {
+        transport: "stdio",
+        command: "fixture-command",
+        args: ["", "  value  ", "duplicate", "duplicate"],
+      },
+    },
+  }, "/tmp/external-mcp-args.json");
+  const server = parsed.servers[0];
+  expect(server?.transport).toBe("stdio");
+  if (!server || server.transport !== "stdio") throw new Error("stdio config was not parsed");
+  expect(server.args).toEqual(["", "  value  ", "duplicate", "duplicate"]);
+
+  expect(() => parseExternalMcpConfig({
+    version: 1,
+    servers: {
+      bad: {
+        transport: "stdio",
+        command: "fixture-command",
+        args: ["ok", 123],
+      },
+    },
+  }, "/tmp/external-mcp-bad-args.json")).toThrow("args must be an array of strings");
+});
+
 test("external MCP config rejects unknown fields, unsupported transports, URL credentials, and normalized alias collisions", () => {
   const path = "/tmp/external-mcp-test.json";
   expect(() => parseExternalMcpConfig({
@@ -137,6 +168,37 @@ test("public external MCP naming is deterministic and rejects unsafe or overlong
   expect(() => normalizeExternalMcpAlias("bad alias")).toThrow("invalid");
   expect(() => normalizeExternalToolName("bad\u0000tool")).toThrow("safely");
   expect(() => externalMcpPublicToolName("a", "x".repeat(EXTERNAL_MCP_PUBLIC_TOOL_NAME_MAX))).toThrow("too long");
+});
+
+test("external MCP error sanitization redacts inherited and literal stdio env values at any length", () => {
+  const oldInherited = process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+  process.env.EXTERNAL_MCP_REVIEW_INHERITED = "review-secret-7x9";
+  try {
+    const config: ExternalMcpStdioServerConfig = {
+      key: "fixture",
+      alias: "fixture",
+      enabled: true,
+      required: false,
+      transport: "stdio",
+      command: "fixture",
+      args: [],
+      env: { EXTERNAL_MCP_REVIEW_LITERAL: "xy" },
+      inheritEnv: ["EXTERNAL_MCP_REVIEW_INHERITED"],
+      tools: {},
+      startupTimeoutMs: 1000,
+      callTimeoutMs: 1000,
+    };
+    const sanitized = sanitizeExternalMcpError(
+      new Error("remote rejected review-secret-7x9 and xy"),
+      config,
+    );
+    expect(sanitized).not.toContain("review-secret-7x9");
+    expect(sanitized).not.toContain("xy");
+    expect(sanitized).toContain("<redacted>");
+  } finally {
+    if (oldInherited === undefined) delete process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+    else process.env.EXTERNAL_MCP_REVIEW_INHERITED = oldInherited;
+  }
 });
 
 test("stdio environment does not inherit arbitrary process secrets unless explicitly requested", () => {

@@ -56,6 +56,14 @@ function stringArray(value: unknown, context: string): string[] {
   return result;
 }
 
+function processArguments(value: unknown, context: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some(item => typeof item !== "string")) {
+    throw new Error(`${context} must be an array of strings`);
+  }
+  return [...value] as string[];
+}
+
 function stringMap(value: unknown, context: string): Record<string, string> {
   if (value === undefined) return {};
   const raw = object(value, context);
@@ -135,7 +143,7 @@ function parseStdioServer(
     ...commonServerFields(raw, key, path),
     transport: "stdio",
     command: raw.command.trim(),
-    args: stringArray(raw.args, `${context}.args`),
+    args: processArguments(raw.args, `${context}.args`),
     cwd: resolvedCwd(raw.cwd, path, `${context}.cwd`),
     env: stringMap(raw.env, `${context}.env`),
     inheritEnv,

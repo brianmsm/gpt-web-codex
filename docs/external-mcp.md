@@ -44,7 +44,9 @@ The file is strict JSON with `version: 1`. Unknown fields and unsupported transp
 }
 ```
 
-GWC does **not** pass its complete process environment to stdio servers. The child receives the MCP SDK's minimal execution baseline, values named explicitly in `inherit_env`, and literal values in `env`. Put secret inheritance behind an explicit `inherit_env` entry; GWC never infers it.
+GWC does **not** pass its complete process environment to stdio servers. The child receives the MCP SDK's minimal execution baseline, values named explicitly in `inherit_env`, and literal values in `env`. Put secret inheritance behind an explicit `inherit_env` entry; GWC never infers it. Values explicitly supplied through `env` or `inherit_env` are captured as redaction material for startup/runtime errors and `external_mcp_status`, including short values.
+
+The `args` array is process data, not normalized configuration: every string is forwarded verbatim, including leading/trailing whitespace, empty strings, and duplicates.
 
 ### Streamable HTTP example
 

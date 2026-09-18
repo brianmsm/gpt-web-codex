@@ -45,15 +45,27 @@ export function stdioEnvironment(config: ExternalMcpStdioServerConfig): Record<s
   return { ...env, ...config.env };
 }
 
-export function sanitizeExternalMcpError(error: unknown, config?: ExternalMcpServerConfig): string {
+export function externalMcpRedactionValues(config: ExternalMcpServerConfig): string[] {
+  if (config.transport !== "stdio") return [];
+  const values = [
+    ...Object.values(config.env),
+    ...config.inheritEnv.map(name => process.env[name]).filter((value): value is string => value !== undefined),
+  ];
+  return [...new Set(values.filter(value => value.length > 0))].sort((left, right) => right.length - left.length);
+}
+
+export function sanitizeExternalMcpError(
+  error: unknown,
+  config?: ExternalMcpServerConfig,
+  redactionValues?: readonly string[],
+): string {
   let message = error instanceof Error ? error.message : String(error);
   if (config?.transport === "streamable-http") {
     message = message.replaceAll(config.url, "<external-mcp-url>");
   }
-  if (config?.transport === "stdio") {
-    for (const value of Object.values(config.env)) {
-      if (value.length >= 4) message = message.replaceAll(value, "<redacted>");
-    }
+  const secrets = redactionValues ?? (config ? externalMcpRedactionValues(config) : []);
+  for (const value of secrets) {
+    message = message.replaceAll(value, "<redacted>");
   }
   message = message
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer <redacted>")

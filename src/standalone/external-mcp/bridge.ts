@@ -1,7 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
-import { connectExternalMcpClient, sanitizeExternalMcpError } from "./client";
+import {
+  connectExternalMcpClient,
+  externalMcpRedactionValues,
+  sanitizeExternalMcpError,
+} from "./client";
 import { loadExternalMcpConfig } from "./config";
 import { externalMcpPublicToolName } from "./naming";
 import { externalMcpToolAllowed } from "./policy";
@@ -51,7 +55,7 @@ function safeExternalResult(result: CallToolResult): CallToolResult {
 }
 
 function toolError(alias: string, toolName: string, error: unknown, runtime: ExternalMcpServerRuntime): CallToolResult {
-  const detail = sanitizeExternalMcpError(error, runtime.config);
+  const detail = sanitizeExternalMcpError(error, runtime.config, runtime.redactionValues);
   runtime.lastRuntimeError = detail;
   const timedOut = /timed?\s*out|timeout/i.test(detail);
   return {
@@ -120,6 +124,7 @@ export class ExternalMcpBridge {
       lifecycle: server.enabled ? "connecting" : "disabled",
       discoveredTools: [],
       exposedTools: [],
+      redactionValues: externalMcpRedactionValues(server),
       lastStartupError: null,
       lastRuntimeError: null,
       closing: false,
@@ -146,7 +151,7 @@ export class ExternalMcpBridge {
         },
         onError: error => {
           if (runtime.closing || this.closed || runtime.lifecycle === "connecting") return;
-          runtime.lastRuntimeError = sanitizeExternalMcpError(error, runtime.config);
+          runtime.lastRuntimeError = sanitizeExternalMcpError(error, runtime.config, runtime.redactionValues);
           console.error(
             `external MCP ${JSON.stringify(runtime.config.alias)} transport error: ${runtime.lastRuntimeError}`,
           );
@@ -167,7 +172,7 @@ export class ExternalMcpBridge {
       } catch {
         // Preserve the original startup failure.
       }
-      runtime.lastStartupError = sanitizeExternalMcpError(error, runtime.config);
+      runtime.lastStartupError = sanitizeExternalMcpError(error, runtime.config, runtime.redactionValues);
       runtime.lifecycle = "unavailable";
       console.error(
         `external MCP ${JSON.stringify(runtime.config.alias)} startup failed: ${runtime.lastStartupError}`,
@@ -185,7 +190,7 @@ export class ExternalMcpBridge {
       const runtime = enabled[index]!;
       if (runtime.config.required) {
         requiredFailures.push(
-          `${runtime.config.alias}: ${runtime.lastStartupError ?? sanitizeExternalMcpError(result.reason, runtime.config)}`,
+          `${runtime.config.alias}: ${runtime.lastStartupError ?? sanitizeExternalMcpError(result.reason, runtime.config, runtime.redactionValues)}`,
         );
       }
     });
@@ -224,6 +229,7 @@ export class ExternalMcpBridge {
     for (const runtime of this.runtimes) {
       if (runtime.lifecycle !== "connected") continue;
       let collision: string | null = null;
+      const stagedNames = new Map<string, { alias: string; original: string }>();
       for (const tool of runtime.exposedTools) {
         if (nativeToolNames.has(tool.publicName) || tool.publicName === "external_mcp_status") {
           collision = `public tool name collides with a native GWC tool: ${tool.publicName}`;
@@ -236,7 +242,7 @@ export class ExternalMcpBridge {
             + `${previous.alias}/${previous.original} and ${runtime.config.alias}/${tool.originalName}`;
           break;
         }
-        globallySeen.set(tool.publicName, { alias: runtime.config.alias, original: tool.originalName });
+        stagedNames.set(tool.publicName, { alias: runtime.config.alias, original: tool.originalName });
       }
       if (collision) {
         runtime.lastStartupError = collision;
@@ -252,7 +258,9 @@ export class ExternalMcpBridge {
           throw new Error(`Required external MCP ${JSON.stringify(runtime.config.alias)} rejected: ${collision}`);
         }
         console.error(`external MCP ${JSON.stringify(runtime.config.alias)} rejected: ${collision}`);
+        continue;
       }
+      for (const [publicName, mapping] of stagedNames) globallySeen.set(publicName, mapping);
     }
 
     server.registerTool("external_mcp_status", {
@@ -335,7 +343,7 @@ export class ExternalMcpBridge {
       try {
         await runtime.client.close();
       } catch (error) {
-        runtime.lastRuntimeError = sanitizeExternalMcpError(error, runtime.config);
+        runtime.lastRuntimeError = sanitizeExternalMcpError(error, runtime.config, runtime.redactionValues);
       } finally {
         runtime.lifecycle = "closed";
       }

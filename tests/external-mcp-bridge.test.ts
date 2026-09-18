@@ -15,6 +15,8 @@ import { startExternalMcpHttpFixture } from "./fixtures/external-mcp-http";
 
 const stdioFixture = join(import.meta.dir, "fixtures", "external-mcp-stdio.ts");
 const invalidStdioFixture = join(import.meta.dir, "fixtures", "external-mcp-invalid-stdio.ts");
+const startupErrorFixture = join(import.meta.dir, "fixtures", "external-mcp-startup-error.ts");
+const namesStdioFixture = join(import.meta.dir, "fixtures", "external-mcp-names-stdio.ts");
 
 function config(servers: Record<string, unknown>): ExternalMcpConfig {
   return parseExternalMcpConfig({ version: 1, servers }, "/tmp/gwc-external-mcp-test.json");
@@ -281,6 +283,90 @@ test("stdio child receives only safe baseline plus explicitly inherited/literal 
   }
 });
 
+test("startup errors and external_mcp_status redact inherited and literal stdio secrets", async () => {
+  const oldInherited = process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+  process.env.EXTERNAL_MCP_REVIEW_INHERITED = "review-secret-7x9";
+  let bridge: ExternalMcpBridge | undefined;
+  let harness: OutwardHarness | undefined;
+  try {
+    bridge = await ExternalMcpBridge.initialize({
+      config: config({
+        startup_secret: {
+          transport: "stdio",
+          command: process.execPath,
+          args: [startupErrorFixture],
+          inherit_env: ["EXTERNAL_MCP_REVIEW_INHERITED"],
+          env: { EXTERNAL_MCP_REVIEW_LITERAL: "xy" },
+          startup_timeout_ms: 2000,
+        },
+      }),
+    });
+    const serverStatus = bridge.status().servers[0];
+    expect(serverStatus?.lifecycle).toBe("unavailable");
+    expect(serverStatus?.last_startup_error).toContain("<redacted>");
+    expect(JSON.stringify(serverStatus)).not.toContain("review-secret-7x9");
+    expect(JSON.stringify(serverStatus)).not.toContain("xy");
+
+    harness = await outwardHarness(bridge);
+    const statusResult = await harness.client.callTool({ name: "external_mcp_status", arguments: {} });
+    if ("toolResult" in statusResult) throw new Error("unexpected task result");
+    const statusText = JSON.stringify(statusResult.structuredContent);
+    expect(statusText).not.toContain("review-secret-7x9");
+    expect(statusText).not.toContain("xy");
+    expect(statusText).toContain("<redacted>");
+  } finally {
+    if (harness) await harness.close();
+    else await bridge?.shutdown();
+    if (oldInherited === undefined) delete process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+    else process.env.EXTERNAL_MCP_REVIEW_INHERITED = oldInherited;
+  }
+});
+
+test("runtime errors and external_mcp_status use the stdio secret snapshot captured at startup", async () => {
+  const oldInherited = process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+  process.env.EXTERNAL_MCP_REVIEW_INHERITED = "runtime-secret-8q2";
+  let bridge: ExternalMcpBridge | undefined;
+  let harness: OutwardHarness | undefined;
+  try {
+    bridge = await ExternalMcpBridge.initialize({
+      config: config({
+        runtime_secret: stdioServer({
+          inherit_env: ["EXTERNAL_MCP_REVIEW_INHERITED"],
+          env: { EXTERNAL_MCP_REVIEW_LITERAL: "z" },
+          tools: { allow: ["readonly_status"] },
+        }),
+      }),
+    });
+    harness = await outwardHarness(bridge);
+
+    process.env.EXTERNAL_MCP_REVIEW_INHERITED = "changed-after-spawn";
+    const runtime = (bridge as any).runtimes[0];
+    runtime.client.callTool = async () => {
+      throw new Error("remote leaked runtime-secret-8q2 and z");
+    };
+
+    const failed = await harness.client.callTool({ name: "runtime_secret__readonly_status", arguments: {} });
+    if ("toolResult" in failed) throw new Error("unexpected task result");
+    expect(failed.isError).toBe(true);
+    expect(textContent(failed)).not.toContain("runtime-secret-8q2");
+    expect(textContent(failed)).not.toContain(" and z");
+    expect(textContent(failed)).toContain("<redacted>");
+
+    const runtimeStatus = bridge.status().servers[0];
+    expect(runtimeStatus?.last_runtime_error).toContain("<redacted>");
+    expect(JSON.stringify(runtimeStatus)).not.toContain("runtime-secret-8q2");
+
+    const statusResult = await harness.client.callTool({ name: "external_mcp_status", arguments: {} });
+    if ("toolResult" in statusResult) throw new Error("unexpected task result");
+    expect(JSON.stringify(statusResult.structuredContent)).not.toContain("runtime-secret-8q2");
+  } finally {
+    if (harness) await harness.close();
+    else await bridge?.shutdown();
+    if (oldInherited === undefined) delete process.env.EXTERNAL_MCP_REVIEW_INHERITED;
+    else process.env.EXTERNAL_MCP_REVIEW_INHERITED = oldInherited;
+  }
+});
+
 test("optional server failure is isolated while a second server remains usable", async () => {
   const bridge = await ExternalMcpBridge.initialize({
     config: config({
@@ -478,6 +564,51 @@ test("native name collision aborts registration for a required external server",
     expect(bridge.status().servers[0]?.lifecycle).toBe("unavailable");
   } finally {
     await Promise.allSettled([server.close(), bridge.shutdown()]);
+  }
+});
+
+test("rejected optional server does not reserve staged public names for later servers", async () => {
+  const bridge = await ExternalMcpBridge.initialize({
+    config: config({
+      first: {
+        alias: "x",
+        transport: "stdio",
+        command: process.execPath,
+        args: [namesStdioFixture, "p__s"],
+        startup_timeout_ms: 5000,
+      },
+      rejected: {
+        alias: "x__p",
+        transport: "stdio",
+        command: process.execPath,
+        args: [namesStdioFixture, "q__r", "s"],
+        startup_timeout_ms: 5000,
+      },
+      later: {
+        alias: "x__p__q",
+        transport: "stdio",
+        command: process.execPath,
+        args: [namesStdioFixture, "r"],
+        startup_timeout_ms: 5000,
+      },
+    }),
+  });
+  const harness = await outwardHarness(bridge);
+  try {
+    const statuses = bridge.status().servers;
+    expect(statuses.find(item => item.alias === "x")?.lifecycle).toBe("connected");
+    expect(statuses.find(item => item.alias === "x__p")?.lifecycle).toBe("unavailable");
+    expect(statuses.find(item => item.alias === "x__p__q")?.lifecycle).toBe("connected");
+
+    const names = (await harness.client.listTools()).tools.map(tool => tool.name);
+    expect(names).toContain("x__p__s");
+    expect(names).toContain("x__p__q__r");
+    expect(names.filter(name => name === "x__p__q__r")).toHaveLength(1);
+
+    const later = await harness.client.callTool({ name: "x__p__q__r", arguments: {} });
+    expect(textContent(later)).toBe("called:r");
+  } finally {
+    await harness.close();
   }
 });
 
