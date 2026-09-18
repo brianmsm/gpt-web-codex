@@ -172,6 +172,7 @@ test("stdio bridge dynamically preserves schema, annotations, arguments, results
     expect("toolResult" in remoteError).toBe(false);
     if ("toolResult" in remoteError) throw new Error("unexpected task result");
     expect(remoteError.isError).toBe(true);
+    expect(textContent(remoteError)).toContain('External MCP "fixture" tool "error_tool" reported an error.');
     expect(textContent(remoteError)).toContain("fixture remote error");
 
     const metadata = await harness.client.callTool({ name: "fixture__metadata_result", arguments: {} });

@@ -46,9 +46,15 @@ function stripProtocolMeta(value: unknown): unknown {
   return result;
 }
 
-function safeExternalResult(result: CallToolResult): CallToolResult {
+function safeExternalResult(result: CallToolResult, alias: string, toolName: string): CallToolResult {
+  const content = stripProtocolMeta(result.content) as CallToolResult["content"];
   return {
-    content: stripProtocolMeta(result.content) as CallToolResult["content"],
+    content: result.isError === true
+      ? [{
+        type: "text",
+        text: `External MCP ${JSON.stringify(alias)} tool ${JSON.stringify(toolName)} reported an error.`,
+      }, ...content]
+      : content,
     ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
     ...(result.isError === undefined ? {} : { isError: result.isError }),
   };
@@ -322,7 +328,7 @@ export class ExternalMcpBridge {
                 runtime,
               );
             }
-            return safeExternalResult(result);
+            return safeExternalResult(result, runtime.config.alias, tool.originalName);
           } catch (error) {
             return toolError(runtime.config.alias, tool.originalName, error, runtime);
           }
