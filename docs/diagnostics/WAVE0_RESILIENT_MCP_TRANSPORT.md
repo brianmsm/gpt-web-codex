@@ -187,7 +187,9 @@ not the sleep itself.
 
 1. Proton must be disconnected and stable.
 2. Confirm one read-only MCP call works before arming the run.
-3. Create a unique run directory under `diagnostics/wave0-runs/`.
+3. Choose a unique **not-yet-existing** output path under
+   `diagnostics/wave0-runs/`. Do not pre-create it; the recorder is the sole
+   authority that creates the run directory with `exist_ok=False`.
 4. Launch the autonomous recorder in a Herdr pane for about 90 seconds.
 5. Verify at least 10 seconds of samples already exist and
    `proton0` is absent.
@@ -204,11 +206,19 @@ not the sleep itself.
 14. Treat the recorder's physical network evidence as authoritative. A real
     Connect reproduction must finish with
     `recorder-result.json -> transition_evidence.transition_valid = true`.
-    The current validity rule requires: initial `proton0` absent, `proton0`
-    observed during the run, at least one sampled public-reachability outage,
-    and `proton0` present at the end. If this is false, the run is
-    **INVALID / NOT CLASSIFIABLE**, regardless of PID stability or a manual
-    Connect instruction/confirmation.
+    The validity rule requires all of the following:
+    - initial `proton0` absent and final `proton0` present;
+    - a sustained public-reachability outage lasting at least 2,000 ms with
+      multiple unreachable samples and an observed recovery;
+    - that outage starts before the first appearance of `proton0`, and
+      `proton0` appears either during it or no more than 3,000 ms after the
+      first recovered sample;
+    - an observed IPv4 default-route or `ip rule` change.
+    A TCP hiccup, an outage long before Proton, or an outage that begins after
+    `proton0` already appeared is not associated evidence. If no associated
+    outage satisfies these conditions, the run is **INVALID / NOT
+    CLASSIFIABLE**, regardless of PID stability or a manual Connect
+    instruction/confirmation.
 
 ## Run 2: READ-ONLY around transition
 
@@ -246,6 +256,9 @@ not the sleep itself.
 No environment dump is captured.
 
 Command lines are redacted for token/key/authorization-like arguments.
+Any textual `Authorization:` or `Authorization=` value is redacted in full
+through end-of-line, regardless of authentication scheme (Basic, Digest,
+AWS-style, custom, or otherwise).
 
 Tunnel-client log ingestion is a field whitelist and sanitizes string values.
 

@@ -16,8 +16,7 @@ SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
 AUTHORIZATION_RE = re.compile(
-    r"(?i)\b(authorization)([\s]*[=:][\s]*)"
-    r"(?:(?:basic|bearer|digest|negotiate)\s+)?[^\s,;]+"
+    r"(?im)\b(authorization)([\t ]*[=:][\t ]*)[^\r\n]*"
 )
 BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s,;]+")
 SENSITIVE_ASSIGNMENT_RE = re.compile(

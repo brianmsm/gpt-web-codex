@@ -125,12 +125,17 @@ class RecorderUnitTests(unittest.TestCase):
 
     def test_sanitize_text_redacts_embedded_sensitive_values(self):
         raw = (
-            "Authorization=Bearer-opaque "
-            "Authorization: Basic dXNlcjpwYXNz "
-            "Authorization=Basic YWxpY2U6c2VjcmV0 "
             "token=abc123 "
             "header Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature "
-            "https://example.test/path?api_key=qwerty&x=1"
+            "https://example.test/path?api_key=qwerty&x=1\n"
+            "Authorization=Bearer-opaque\n"
+            "Authorization: Basic dXNlcjpwYXNz\n"
+            "Authorization=Basic YWxpY2U6c2VjcmV0\n"
+            'Authorization: Digest username="alice", realm="example", '
+            'nonce="NONCESECRET", response="RESPSECRET"\n'
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE, "
+            "SignedHeaders=host, Signature=SIGSECRET\n"
+            "Authorization: CustomScheme opaque-part second-secret"
         )
         sanitized = RECORDER.sanitize_text(raw)
         self.assertNotIn("abc123", sanitized)
@@ -138,9 +143,145 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertNotIn("qwerty", sanitized)
         self.assertNotIn("dXNlcjpwYXNz", sanitized)
         self.assertNotIn("YWxpY2U6c2VjcmV0", sanitized)
+        self.assertNotIn("NONCESECRET", sanitized)
+        self.assertNotIn("RESPSECRET", sanitized)
+        self.assertNotIn("AKIAEXAMPLE", sanitized)
+        self.assertNotIn("SIGSECRET", sanitized)
+        self.assertNotIn("opaque-part", sanitized)
+        self.assertNotIn("second-secret", sanitized)
         self.assertIn("Authorization: <redacted>", sanitized)
         self.assertIn("Authorization=<redacted>", sanitized)
         self.assertIn("<redacted>", sanitized)
+
+    def test_transition_validity_accepts_sustained_associated_outage(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=15_000,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 9_750,
+                    "first_unreachable_epoch_ms": 10_000,
+                    "last_unreachable_epoch_ms": 17_750,
+                    "unreachable_sample_count": 32,
+                    "first_reachable_after_epoch_ms": 18_000,
+                }
+            ],
+            ipv4_default_changed=False,
+            ip_rule_changed=True,
+        )
+        self.assertTrue(evidence["transition_valid"])
+        self.assertTrue(evidence["classification_allowed"])
+        self.assertEqual(evidence["associated_outage_index"], 0)
+        self.assertTrue(evidence["outage_episodes"][0]["sustained"])
+        self.assertTrue(
+            evidence["outage_episodes"][0][
+                "proton_temporally_associated"
+            ]
+        )
+
+    def test_transition_validity_rejects_unrelated_earlier_outage(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=60_000,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 9_750,
+                    "first_unreachable_epoch_ms": 10_000,
+                    "last_unreachable_epoch_ms": 17_750,
+                    "unreachable_sample_count": 32,
+                    "first_reachable_after_epoch_ms": 18_000,
+                }
+            ],
+            ipv4_default_changed=True,
+            ip_rule_changed=True,
+        )
+        self.assertFalse(evidence["transition_valid"])
+        self.assertIsNone(evidence["associated_outage_index"])
+
+    def test_transition_validity_rejects_outage_after_proton(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=10_000,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 59_750,
+                    "first_unreachable_epoch_ms": 60_000,
+                    "last_unreachable_epoch_ms": 67_750,
+                    "unreachable_sample_count": 32,
+                    "first_reachable_after_epoch_ms": 68_000,
+                }
+            ],
+            ipv4_default_changed=True,
+            ip_rule_changed=True,
+        )
+        self.assertFalse(evidence["transition_valid"])
+        self.assertIsNone(evidence["associated_outage_index"])
+
+    def test_transition_validity_rejects_single_tcp_hiccup(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=9_700,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 9_250,
+                    "first_unreachable_epoch_ms": 9_500,
+                    "last_unreachable_epoch_ms": 9_500,
+                    "unreachable_sample_count": 1,
+                    "first_reachable_after_epoch_ms": 9_750,
+                }
+            ],
+            ipv4_default_changed=True,
+            ip_rule_changed=True,
+        )
+        self.assertFalse(evidence["transition_valid"])
+        self.assertFalse(evidence["outage_episodes"][0]["sustained"])
+
+    def test_transition_validity_accepts_immediately_preceding_outage(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=20_000,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 9_750,
+                    "first_unreachable_epoch_ms": 10_000,
+                    "last_unreachable_epoch_ms": 17_750,
+                    "unreachable_sample_count": 32,
+                    "first_reachable_after_epoch_ms": 18_000,
+                }
+            ],
+            ipv4_default_changed=True,
+            ip_rule_changed=False,
+        )
+        self.assertTrue(evidence["transition_valid"])
+        self.assertEqual(evidence["associated_outage_index"], 0)
+
+    def test_transition_validity_requires_routing_evidence(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=15_000,
+            outage_episodes=[
+                {
+                    "last_reachable_before_epoch_ms": 9_750,
+                    "first_unreachable_epoch_ms": 10_000,
+                    "last_unreachable_epoch_ms": 17_750,
+                    "unreachable_sample_count": 32,
+                    "first_reachable_after_epoch_ms": 18_000,
+                }
+            ],
+            ipv4_default_changed=False,
+            ip_rule_changed=False,
+        )
+        self.assertFalse(evidence["transition_valid"])
+        self.assertIn(
+            "no IPv4-default-route or ip-rule change was observed",
+            evidence["invalid_reasons"],
+        )
 
     def test_runtime_status_projection_is_minimal_and_redacted(self):
         projected = RECORDER.project_runtime_status(

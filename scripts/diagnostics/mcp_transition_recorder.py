@@ -29,12 +29,14 @@ DEFAULT_TUNNEL_LOG = Path(
     "/home/brian/.local/state/tunnel-client/logs/codex-chatgpt-web.log"
 )
 TARGET_INTERFACES = ("wlp99s0", "proton0", "pvpnksintrf0")
+MIN_ASSOCIATED_OUTAGE_MS = 2_000
+MIN_ASSOCIATED_OUTAGE_SAMPLES = 4
+MAX_OUTAGE_END_TO_PROTON_MS = 3_000
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
 AUTHORIZATION_RE = re.compile(
-    r"(?i)\b(authorization)([\s]*[=:][\s]*)"
-    r"(?:(?:basic|bearer|digest|negotiate)\s+)?[^\s,;]+"
+    r"(?im)\b(authorization)([\t ]*[=:][\t ]*)[^\r\n]*"
 )
 BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s,;]+")
 SENSITIVE_ASSIGNMENT_RE = re.compile(
@@ -435,6 +437,104 @@ def validate_target_preconditions(
         "gwc_owned_by_tunnel": gwc_owned_by_tunnel,
         "gwc_direct_child_of_tunnel": direct_child,
         "topology": topology,
+    }
+
+
+def evaluate_transition_evidence(
+    *,
+    initial_proton_present: bool | None,
+    final_proton_present: bool | None,
+    proton_first_seen_epoch_ms: int | None,
+    outage_episodes: list[dict[str, Any]],
+    ipv4_default_changed: bool,
+    ip_rule_changed: bool,
+    min_outage_ms: int = MIN_ASSOCIATED_OUTAGE_MS,
+    min_outage_samples: int = MIN_ASSOCIATED_OUTAGE_SAMPLES,
+    max_outage_end_to_proton_ms: int = MAX_OUTAGE_END_TO_PROTON_MS,
+) -> dict[str, Any]:
+    evaluated_episodes: list[dict[str, Any]] = []
+    associated_outage_index: int | None = None
+
+    for index, raw in enumerate(outage_episodes):
+        episode = dict(raw)
+        first_unreachable = episode.get("first_unreachable_epoch_ms")
+        last_unreachable = episode.get("last_unreachable_epoch_ms")
+        first_reachable_after = episode.get(
+            "first_reachable_after_epoch_ms"
+        )
+        sample_count = int(episode.get("unreachable_sample_count") or 0)
+
+        duration_ms: int | None = None
+        if isinstance(first_unreachable, int):
+            if isinstance(first_reachable_after, int):
+                duration_ms = first_reachable_after - first_unreachable
+            elif isinstance(last_unreachable, int):
+                duration_ms = last_unreachable - first_unreachable
+
+        sustained = bool(
+            duration_ms is not None
+            and duration_ms >= min_outage_ms
+            and sample_count >= min_outage_samples
+            and isinstance(first_reachable_after, int)
+        )
+
+        proton_temporally_associated = False
+        if (
+            sustained
+            and isinstance(first_unreachable, int)
+            and isinstance(first_reachable_after, int)
+            and isinstance(proton_first_seen_epoch_ms, int)
+        ):
+            proton_temporally_associated = bool(
+                first_unreachable <= proton_first_seen_epoch_ms
+                <= first_reachable_after + max_outage_end_to_proton_ms
+            )
+
+        episode["duration_ms"] = duration_ms
+        episode["sustained"] = sustained
+        episode["proton_temporally_associated"] = (
+            proton_temporally_associated
+        )
+        evaluated_episodes.append(episode)
+
+        if proton_temporally_associated and associated_outage_index is None:
+            associated_outage_index = index
+
+    routing_transition_observed = bool(
+        ipv4_default_changed or ip_rule_changed
+    )
+    reasons: list[str] = []
+
+    if initial_proton_present is not False:
+        reasons.append("run did not start with proton0 absent")
+    if proton_first_seen_epoch_ms is None:
+        reasons.append("proton0 was never observed")
+    if final_proton_present is not True:
+        reasons.append("run did not end with proton0 present")
+    if associated_outage_index is None:
+        reasons.append(
+            "no sustained reachability outage was temporally associated "
+            "with the first appearance of proton0"
+        )
+    if not routing_transition_observed:
+        reasons.append("no IPv4-default-route or ip-rule change was observed")
+
+    transition_valid = not reasons
+    return {
+        "initial_proton_present": initial_proton_present,
+        "proton_first_seen_epoch_ms": proton_first_seen_epoch_ms,
+        "final_proton_present": final_proton_present,
+        "outage_episodes": evaluated_episodes,
+        "associated_outage_index": associated_outage_index,
+        "minimum_associated_outage_ms": min_outage_ms,
+        "minimum_associated_outage_samples": min_outage_samples,
+        "max_outage_end_to_proton_ms": max_outage_end_to_proton_ms,
+        "ipv4_default_changed": ipv4_default_changed,
+        "ip_rule_changed": ip_rule_changed,
+        "routing_transition_observed": routing_transition_observed,
+        "transition_valid": transition_valid,
+        "classification_allowed": transition_valid,
+        "invalid_reasons": reasons,
     }
 
 
@@ -1282,23 +1382,14 @@ def main() -> int:
             outage_episodes.append(active_outage)
             active_outage = None
 
-        transition_evidence = {
-            "initial_proton_present": initial_proton_present,
-            "proton_first_seen_epoch_ms": proton_first_seen_epoch_ms,
-            "final_proton_present": final_proton_present,
-            "outage_episodes": outage_episodes,
-            "ipv4_default_changed": ipv4_default_changed,
-            "ip_rule_changed": ip_rule_changed,
-        }
-        transition_evidence["transition_valid"] = bool(
-            initial_proton_present is False
-            and proton_first_seen_epoch_ms is not None
-            and final_proton_present is True
-            and outage_episodes
+        transition_evidence = evaluate_transition_evidence(
+            initial_proton_present=initial_proton_present,
+            final_proton_present=final_proton_present,
+            proton_first_seen_epoch_ms=proton_first_seen_epoch_ms,
+            outage_episodes=outage_episodes,
+            ipv4_default_changed=ipv4_default_changed,
+            ip_rule_changed=ip_rule_changed,
         )
-        transition_evidence["classification_allowed"] = transition_evidence[
-            "transition_valid"
-        ]
 
         final_roles = process_roles()
         end = {
