@@ -29,6 +29,8 @@ class Wave0HelperTests(unittest.TestCase):
                     (
                         "token=abc123 "
                         "Authorization=opaque "
+                        "Authorization: Basic dXNlcjpwYXNz "
+                        "Authorization=Basic YWxpY2U6c2VjcmV0 "
                         "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
                     ),
                 ],
@@ -44,6 +46,8 @@ class Wave0HelperTests(unittest.TestCase):
             self.assertNotIn("abc123", rendered)
             self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", rendered)
             self.assertNotIn("Authorization=opaque", rendered)
+            self.assertNotIn("dXNlcjpwYXNz", rendered)
+            self.assertNotIn("YWxpY2U6c2VjcmV0", rendered)
             self.assertIn("<redacted>", rendered)
 
     def test_read_only_invocation_probe_completes_with_read_activity(self):

@@ -15,9 +15,13 @@ from typing import Any
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
+AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(authorization)([\s]*[=:][\s]*)"
+    r"(?:(?:basic|bearer|digest|negotiate)\s+)?[^\s,;]+"
+)
 BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s,;]+")
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(authorization|api[_ -]?key|token|secret|password|credential)"
+    r"(?i)\b(api[_ -]?key|token|secret|password|credential)"
     r"([\s]*[=:][\s]*)([^\s,;]+)"
 )
 SENSITIVE_QUERY_RE = re.compile(
@@ -61,6 +65,7 @@ def now_human() -> str:
 
 
 def sanitize_text(value: str) -> str:
+    value = AUTHORIZATION_RE.sub(r"\1\2<redacted>", value)
     value = BEARER_RE.sub(r"\1 <redacted>", value)
     value = SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2<redacted>", value)
     value = SENSITIVE_QUERY_RE.sub(r"\1<redacted>", value)

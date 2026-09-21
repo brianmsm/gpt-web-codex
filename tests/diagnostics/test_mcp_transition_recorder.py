@@ -69,7 +69,7 @@ class RecorderUnitTests(unittest.TestCase):
     def test_tunnel_matcher_accepts_actual_executable(self):
         actual = {
             "cmdline": [
-                RECORDER.TUNNEL_EXECUTABLE,
+                "/opt/tools/tunnel-client",
                 "run",
                 "--profile-dir",
                 "/tmp/profiles",
@@ -81,11 +81,12 @@ class RecorderUnitTests(unittest.TestCase):
             RECORDER.matches_role("tunnel_client", actual)
         )
 
-    def test_gwc_matcher_requires_cli_as_second_argv(self):
+    def test_gwc_matcher_requires_structural_cli_shape(self):
+        cli = "/tmp/install/app/cli.js"
         actual = {
             "cmdline": [
                 "/tmp/runtime/bun",
-                RECORDER.GWC_CLI,
+                cli,
                 "mcp",
                 "--state-path",
                 "/tmp/state.json",
@@ -95,7 +96,7 @@ class RecorderUnitTests(unittest.TestCase):
             "cmdline": [
                 "bash",
                 "-c",
-                f"bun {RECORDER.GWC_CLI} mcp",
+                f"bun {cli} mcp --state-path /tmp/state.json",
             ]
         }
         self.assertTrue(RECORDER.matches_role("gwc_mcp", actual))
@@ -125,6 +126,8 @@ class RecorderUnitTests(unittest.TestCase):
     def test_sanitize_text_redacts_embedded_sensitive_values(self):
         raw = (
             "Authorization=Bearer-opaque "
+            "Authorization: Basic dXNlcjpwYXNz "
+            "Authorization=Basic YWxpY2U6c2VjcmV0 "
             "token=abc123 "
             "header Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature "
             "https://example.test/path?api_key=qwerty&x=1"
@@ -133,6 +136,10 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertNotIn("abc123", sanitized)
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", sanitized)
         self.assertNotIn("qwerty", sanitized)
+        self.assertNotIn("dXNlcjpwYXNz", sanitized)
+        self.assertNotIn("YWxpY2U6c2VjcmV0", sanitized)
+        self.assertIn("Authorization: <redacted>", sanitized)
+        self.assertIn("Authorization=<redacted>", sanitized)
         self.assertIn("<redacted>", sanitized)
 
     def test_runtime_status_projection_is_minimal_and_redacted(self):
@@ -186,10 +193,132 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertNotIn("opaque-secret", rendered)
         self.assertIn("<redacted>", rendered)
 
-    def test_current_test_process_is_not_owned_by_gwc_or_tunnel(self):
-        independence = RECORDER.recorder_independence()
+    def test_independence_accepts_synthetic_herdr_owned_chain(self):
+        chain = [
+            {
+                "pid": 100,
+                "ppid": 90,
+                "starttime": 1000,
+                "cmdline": ["python", "mcp_transition_recorder.py"],
+            },
+            {
+                "pid": 90,
+                "ppid": 80,
+                "starttime": 900,
+                "cmdline": ["bash"],
+            },
+            {
+                "pid": 80,
+                "ppid": 1,
+                "starttime": 800,
+                "cmdline": ["/usr/bin/herdr", "server"],
+            },
+        ]
+        independence = RECORDER.assess_recorder_independence(chain)
         self.assertTrue(independence["independent_of_gwc_and_tunnel"])
         self.assertFalse(independence["runtime_ancestors"])
+
+    def test_independence_rejects_synthetic_gwc_owned_chain(self):
+        chain = [
+            {
+                "pid": 100,
+                "ppid": 90,
+                "starttime": 1000,
+                "cmdline": ["python", "mcp_transition_recorder.py"],
+            },
+            {
+                "pid": 90,
+                "ppid": 70,
+                "starttime": 900,
+                "cmdline": [
+                    "/tmp/runtime/bun",
+                    "/tmp/install/app/cli.js",
+                    "mcp",
+                    "--state-path",
+                    "/tmp/state.json",
+                ],
+            },
+            {
+                "pid": 70,
+                "ppid": 1,
+                "starttime": 700,
+                "cmdline": [
+                    "/opt/tools/tunnel-client",
+                    "run",
+                    "--profile",
+                    "codex-chatgpt-web",
+                ],
+            },
+        ]
+        independence = RECORDER.assess_recorder_independence(chain)
+        self.assertFalse(independence["independent_of_gwc_and_tunnel"])
+        self.assertEqual(
+            [item["pid"] for item in independence["runtime_ancestors"]],
+            [90, 70],
+        )
+
+    def test_target_precondition_requires_unique_roles_and_ownership(self):
+        tunnel = {
+            "pid": 70,
+            "ppid": 60,
+            "starttime": 700,
+            "cmdline": [
+                "/opt/tools/tunnel-client",
+                "run",
+                "--profile",
+                "codex-chatgpt-web",
+            ],
+        }
+        gwc = {
+            "pid": 90,
+            "ppid": 70,
+            "starttime": 900,
+            "cmdline": [
+                "/tmp/runtime/bun",
+                "/tmp/install/app/cli.js",
+                "mcp",
+                "--state-path",
+                "/tmp/state.json",
+            ],
+        }
+        herdr = {
+            "pid": 80,
+            "ppid": 1,
+            "starttime": 800,
+            "cmdline": ["/usr/bin/herdr", "server"],
+        }
+        roles = {
+            "tunnel_client": [tunnel],
+            "gwc_mcp": [gwc],
+            "herdr_server": [herdr],
+        }
+        valid = RECORDER.validate_target_preconditions(
+            roles,
+            ancestry_lookup=lambda _pid: [gwc, tunnel],
+        )
+        self.assertTrue(valid["valid"])
+        self.assertTrue(valid["gwc_owned_by_tunnel"])
+        self.assertTrue(valid["gwc_direct_child_of_tunnel"])
+
+        missing = RECORDER.validate_target_preconditions(
+            {**roles, "gwc_mcp": []},
+            ancestry_lookup=lambda _pid: [],
+        )
+        self.assertFalse(missing["valid"])
+        self.assertIn(
+            "expected exactly one gwc_mcp, observed 0",
+            missing["errors"],
+        )
+
+        multiple = RECORDER.validate_target_preconditions(
+            {**roles, "tunnel_client": [tunnel, dict(tunnel, pid=71)]},
+            ancestry_lookup=lambda _pid: [gwc, tunnel],
+        )
+        self.assertFalse(multiple["valid"])
+        self.assertIn(
+            "expected exactly one tunnel_client, observed 2",
+            multiple["errors"],
+        )
 
     def test_watcher_can_exclude_recorder_pid(self):
         results = RECORDER.watched_processes(

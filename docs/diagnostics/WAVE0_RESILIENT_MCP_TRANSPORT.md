@@ -61,6 +61,27 @@ The Herdr command that submits the recorder is expected to return while the
 recorder keeps running. This is deliberate: the recorder must not depend on a
 later MCP call to stop. It exits automatically after `--duration`.
 
+## Target-process precondition
+
+A run is classifiable only if recorder startup finds exactly one:
+
+- tunnel-client for profile `codex-chatgpt-web`;
+- GWC `.../app/cli.js mcp --state-path ...` process;
+- Herdr server.
+
+The GWC process must also have the unique tunnel-client in its live ancestry.
+The matcher is structural rather than tied to one absolute GWC installation
+path. If any required role has zero or multiple matches, or the ownership
+relationship is absent, the recorder exits non-zero **before creating the run
+directory**. Missing observability is therefore never interpreted as a stable
+process.
+
+A valid run persists this startup proof in:
+
+```text
+metadata.json -> target_precondition
+```
+
 ## Process identity and topology
 
 Process restart is determined from:
@@ -173,11 +194,21 @@ not the sleep itself.
 6. Append `run_armed` and `vpn_connect_instruction`.
 7. No deliberate MCP invocation may be active when the user presses Connect.
 8. Instruct the user: `READY FOR PROTON RUN 1 — press Connect now`.
-9. Do not use the MCP path merely to poll during the outage.
-10. After the connector becomes usable, make one new read-only connector call
+9. When the user next confirms they pressed Connect, append
+   `vpn_connect_user_confirmed`. This is lateral evidence only.
+10. Do not use the MCP path merely to poll during the outage.
+11. After the connector becomes usable, make one new read-only connector call
     and record that result separately.
-11. Let the recorder terminate by duration.
-12. Preserve the complete run directory in the worktree.
+12. Let the recorder terminate by duration.
+13. Preserve the complete run directory in the worktree.
+14. Treat the recorder's physical network evidence as authoritative. A real
+    Connect reproduction must finish with
+    `recorder-result.json -> transition_evidence.transition_valid = true`.
+    The current validity rule requires: initial `proton0` absent, `proton0`
+    observed during the run, at least one sampled public-reachability outage,
+    and `proton0` present at the end. If this is false, the run is
+    **INVALID / NOT CLASSIFIABLE**, regardless of PID stability or a manual
+    Connect instruction/confirmation.
 
 ## Run 2: READ-ONLY around transition
 
@@ -234,7 +265,15 @@ experiment, but no credentials or authorization material should be present.
 
 ## Classification rules
 
-Use only strong process identity:
+First require both:
+
+- `metadata.json -> target_precondition.valid = true`;
+- `recorder-result.json -> transition_evidence.transition_valid = true`.
+
+If either is false, the run is **INVALID / NOT CLASSIFIABLE** and must not be
+mapped to A/B/C/D.
+
+For a valid run, use only strong process identity:
 
 - A: tunnel same + GWC same;
 - B: tunnel changed + GWC changed;

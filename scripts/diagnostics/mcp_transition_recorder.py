@@ -32,9 +32,13 @@ TARGET_INTERFACES = ("wlp99s0", "proton0", "pvpnksintrf0")
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
+AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(authorization)([\s]*[=:][\s]*)"
+    r"(?:(?:basic|bearer|digest|negotiate)\s+)?[^\s,;]+"
+)
 BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s,;]+")
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(authorization|api[_ -]?key|token|secret|password|credential)"
+    r"(?i)\b(api[_ -]?key|token|secret|password|credential)"
     r"([\s]*[=:][\s]*)([^\s,;]+)"
 )
 SENSITIVE_QUERY_RE = re.compile(
@@ -50,11 +54,10 @@ ROLES = (
     "launcher_main",
 )
 
-TUNNEL_EXECUTABLE = "/home/brian/.codex-chatgpt-web/bin/tunnel-client"
-GWC_CLI = "/home/brian/.codex-chatgpt-web/versions/2.2.11-linux-x64/app/cli.js"
-LAUNCHER_APPIMAGE = (
-    "/home/brian/.local/lib/gpt-web-codex/2.2.11-herdr.3/GPT-Web-Codex.AppImage"
-)
+TUNNEL_EXECUTABLE_NAME = "tunnel-client"
+GWC_ENTRYPOINT_NAME = "cli.js"
+EXPECTED_PROFILE = "codex-chatgpt-web"
+LAUNCHER_APPIMAGE_NAME = "GPT-Web-Codex.AppImage"
 
 TUNNEL_EVENT_KEYS = {
     "time",
@@ -145,6 +148,7 @@ def run_local(args: list[str], timeout: float = 0.15) -> dict[str, Any]:
 
 
 def sanitize_text(value: str) -> str:
+    value = AUTHORIZATION_RE.sub(r"\1\2<redacted>", value)
     value = BEARER_RE.sub(r"\1 <redacted>", value)
     value = SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2<redacted>", value)
     value = SENSITIVE_QUERY_RE.sub(r"\1<redacted>", value)
@@ -227,25 +231,31 @@ def matches_role(role: str, ident: dict[str, Any]) -> bool:
 
     if role == "tunnel_client":
         return (
-            parts[0] == TUNNEL_EXECUTABLE
+            Path(parts[0]).name == TUNNEL_EXECUTABLE_NAME
             and len(parts) >= 2
             and parts[1] == "run"
             and "--profile" in parts
-            and "codex-chatgpt-web" in parts
+            and EXPECTED_PROFILE in parts
         )
 
     if role == "gwc_mcp":
         return (
             len(parts) >= 3
-            and parts[1] == GWC_CLI
+            and Path(parts[1]).name == GWC_ENTRYPOINT_NAME
+            and Path(parts[1]).parent.name == "app"
             and parts[2] == "mcp"
+            and "--state-path" in parts
         )
 
     if role == "herdr_server":
-        return parts[:2] == ["/usr/bin/herdr", "server"]
+        return (
+            len(parts) >= 2
+            and Path(parts[0]).name == "herdr"
+            and parts[1] == "server"
+        )
 
     if role == "launcher_appimage":
-        return parts[0] == LAUNCHER_APPIMAGE
+        return Path(parts[0]).name == LAUNCHER_APPIMAGE_NAME
 
     if role == "launcher_main":
         return Path(parts[0]).name == "gpt-web-codex-launcher"
@@ -357,19 +367,74 @@ def process_topology(
     }
 
 
-def recorder_independence() -> dict[str, Any]:
-    chain = process_ancestry(os.getpid())
-    runtime_ancestors: list[dict[str, Any]] = []
-    for ident in chain[1:]:
-        if matches_role("gwc_mcp", ident) or matches_role(
-            "tunnel_client", ident
-        ):
-            runtime_ancestors.append(ident)
+def assess_recorder_independence(
+    chain: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runtime_ancestors = [
+        ident
+        for ident in chain[1:]
+        if matches_role("gwc_mcp", ident)
+        or matches_role("tunnel_client", ident)
+    ]
     return {
-        "recorder": proc_identity(os.getpid()),
+        "recorder": chain[0] if chain else None,
         "ancestry": chain,
         "independent_of_gwc_and_tunnel": not runtime_ancestors,
         "runtime_ancestors": runtime_ancestors,
+    }
+
+
+def recorder_independence() -> dict[str, Any]:
+    return assess_recorder_independence(process_ancestry(os.getpid()))
+
+
+def validate_target_preconditions(
+    roles: dict[str, list[dict[str, Any]]],
+    ancestry_lookup: Any = None,
+) -> dict[str, Any]:
+    if ancestry_lookup is None:
+        ancestry_lookup = process_ancestry
+    errors: list[str] = []
+    required = ("tunnel_client", "gwc_mcp", "herdr_server")
+    counts = {role: len(roles.get(role, [])) for role in required}
+
+    for role in required:
+        count = counts[role]
+        if count != 1:
+            errors.append(
+                f"expected exactly one {role}, observed {count}"
+            )
+
+    topology: dict[str, Any] | None = None
+    gwc_owned_by_tunnel: bool | None = None
+    direct_child: bool | None = None
+
+    if counts["tunnel_client"] == 1 and counts["gwc_mcp"] == 1:
+        tunnel = roles["tunnel_client"][0]
+        gwc = roles["gwc_mcp"][0]
+        ancestry = ancestry_lookup(gwc["pid"])
+        topology = {
+            "gwc_ancestry": ancestry,
+            "tunnel_identity": tunnel,
+        }
+        gwc_owned_by_tunnel = any(
+            item["pid"] == tunnel["pid"]
+            and item["starttime"] == tunnel["starttime"]
+            for item in ancestry[1:]
+        )
+        direct_child = gwc["ppid"] == tunnel["pid"]
+        if not gwc_owned_by_tunnel:
+            errors.append(
+                "GWC MCP ancestry does not contain the unique tunnel-client"
+            )
+
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "counts": counts,
+        "gwc_owned_by_tunnel": gwc_owned_by_tunnel,
+        "gwc_direct_child_of_tunnel": direct_child,
+        "topology": topology,
     }
 
 
@@ -825,6 +890,7 @@ def write_metadata(
     args: argparse.Namespace,
     initial_roles: dict[str, list[dict[str, Any]]],
     independence: dict[str, Any],
+    target_precondition: dict[str, Any],
 ) -> None:
     meta = {
         "schema": 1,
@@ -842,6 +908,7 @@ def write_metadata(
         "target_interfaces": list(TARGET_INTERFACES),
         "watch_patterns": list(args.watch_pattern),
         "recorder_independence": independence,
+        "target_precondition": target_precondition,
         "versions": {
             "python": sys.version.split()[0],
             "kernel": platform.release(),
@@ -925,12 +992,23 @@ def main() -> int:
             "launch it from an independent Herdr pane"
         )
 
+    initial_roles = process_roles()
+    target_precondition = validate_target_preconditions(initial_roles)
+    if not target_precondition["valid"]:
+        parser.error(
+            "target process precondition failed: "
+            + "; ".join(target_precondition["errors"])
+        )
+
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
 
-    initial_roles = process_roles()
     write_metadata(
-        out / "metadata.json", args, initial_roles, independence
+        out / "metadata.json",
+        args,
+        initial_roles,
+        independence,
+        target_precondition,
     )
     capture_runtime_status(out / "runtime-status-before.json")
 
@@ -1000,6 +1078,17 @@ def main() -> int:
     interval = args.interval_ms / 1000.0
     sample_index = 0
     next_tick = start_monotonic
+
+    initial_proton_present: bool | None = None
+    final_proton_present: bool | None = None
+    proton_first_seen_epoch_ms: int | None = None
+    initial_ipv4_default: str | None = None
+    initial_ip_rule: str | None = None
+    ipv4_default_changed = False
+    ip_rule_changed = False
+    last_reachable_epoch_ms: int | None = None
+    active_outage: dict[str, Any] | None = None
+    outage_episodes: list[dict[str, Any]] = []
 
     try:
         while time.monotonic() < deadline:
@@ -1104,6 +1193,48 @@ def main() -> int:
                 },
             }
 
+            proton_present = sample["network"]["interfaces"]["proton0"]["exists"]
+            reachable = sample["network"]["tcp_1_1_1_1_443"]["ok"]
+            epoch_ms = sample["epoch_ms"]
+            current_ipv4_default = sample["network"]["default_route_ipv4"]
+            current_ip_rule = sample["network"]["ip_rule"]
+
+            if sample_index == 0:
+                initial_proton_present = proton_present
+                initial_ipv4_default = current_ipv4_default
+                initial_ip_rule = current_ip_rule
+            final_proton_present = proton_present
+
+            if proton_present and proton_first_seen_epoch_ms is None:
+                proton_first_seen_epoch_ms = epoch_ms
+
+            if (
+                initial_ipv4_default is not None
+                and current_ipv4_default != initial_ipv4_default
+            ):
+                ipv4_default_changed = True
+            if initial_ip_rule is not None and current_ip_rule != initial_ip_rule:
+                ip_rule_changed = True
+
+            if reachable:
+                if active_outage is not None:
+                    active_outage["first_reachable_after_epoch_ms"] = epoch_ms
+                    outage_episodes.append(active_outage)
+                    active_outage = None
+                last_reachable_epoch_ms = epoch_ms
+            else:
+                if active_outage is None:
+                    active_outage = {
+                        "last_reachable_before_epoch_ms": last_reachable_epoch_ms,
+                        "first_unreachable_epoch_ms": epoch_ms,
+                        "last_unreachable_epoch_ms": epoch_ms,
+                        "unreachable_sample_count": 1,
+                        "first_reachable_after_epoch_ms": None,
+                    }
+                else:
+                    active_outage["last_unreachable_epoch_ms"] = epoch_ms
+                    active_outage["unreachable_sample_count"] += 1
+
             if sample_index % 4 == 0:
                 sample["dns"] = dns_snapshot()
                 sample["network_manager_active"] = (
@@ -1147,6 +1278,28 @@ def main() -> int:
             out / "runtime-status-after.json"
         )
 
+        if active_outage is not None:
+            outage_episodes.append(active_outage)
+            active_outage = None
+
+        transition_evidence = {
+            "initial_proton_present": initial_proton_present,
+            "proton_first_seen_epoch_ms": proton_first_seen_epoch_ms,
+            "final_proton_present": final_proton_present,
+            "outage_episodes": outage_episodes,
+            "ipv4_default_changed": ipv4_default_changed,
+            "ip_rule_changed": ip_rule_changed,
+        }
+        transition_evidence["transition_valid"] = bool(
+            initial_proton_present is False
+            and proton_first_seen_epoch_ms is not None
+            and final_proton_present is True
+            and outage_episodes
+        )
+        transition_evidence["classification_allowed"] = transition_evidence[
+            "transition_valid"
+        ]
+
         final_roles = process_roles()
         end = {
             "ended_epoch_ms": now_epoch_ms(),
@@ -1156,6 +1309,7 @@ def main() -> int:
                 3,
             ),
             "sample_count": sample_index,
+            "transition_evidence": transition_evidence,
             "final_processes": add_lstart(final_roles),
             "final_topology": process_topology(final_roles),
             "recorder_final_identity": proc_identity(os.getpid()),
@@ -1177,6 +1331,10 @@ def main() -> int:
             f"- Requested duration: {args.duration:.3f} s\n"
             f"- Actual duration: "
             f"{end['actual_duration_ms'] / 1000:.3f} s\n"
+            f"- Physical Proton transition valid: "
+            f"{transition_evidence['transition_valid']}\n"
+            f"- A/B/C/D classification allowed: "
+            f"{transition_evidence['classification_allowed']}\n"
             "- Analysis/classification: pending executor "
             "correlation with connector and invocation observations.\n"
         )
