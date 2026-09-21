@@ -32,6 +32,15 @@ TARGET_INTERFACES = ("wlp99s0", "proton0", "pvpnksintrf0")
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
+BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s,;]+")
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(authorization|api[_ -]?key|token|secret|password|credential)"
+    r"([\s]*[=:][\s]*)([^\s,;]+)"
+)
+SENSITIVE_QUERY_RE = re.compile(
+    r"(?i)([?&](?:authorization|api[_-]?key|token|secret|password|credential)=)"
+    r"([^&#\s]+)"
+)
 
 ROLES = (
     "tunnel_client",
@@ -135,6 +144,30 @@ def run_local(args: list[str], timeout: float = 0.15) -> dict[str, Any]:
         }
 
 
+def sanitize_text(value: str) -> str:
+    value = BEARER_RE.sub(r"\1 <redacted>", value)
+    value = SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2<redacted>", value)
+    value = SENSITIVE_QUERY_RE.sub(r"\1<redacted>", value)
+    return value
+
+
+def sanitize_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        return [sanitize_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                "<redacted>"
+                if SENSITIVE_RE.search(str(key))
+                else sanitize_value(item)
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 def sanitize_cmdline(parts: Iterable[str]) -> list[str]:
     out: list[str] = []
     redact_next = False
@@ -155,7 +188,7 @@ def sanitize_cmdline(parts: Iterable[str]) -> list[str]:
             redact_next = "=" not in arg
             continue
 
-        out.append(arg)
+        out.append(sanitize_text(arg))
     return out
 
 
@@ -236,6 +269,32 @@ def process_roles() -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+def watched_processes(
+    patterns: list[str],
+    exclude_pids: set[int] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {pattern: [] for pattern in patterns}
+    if not patterns:
+        return result
+    excluded = exclude_pids or set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in excluded:
+            continue
+        ident = proc_identity(pid)
+        if not ident:
+            continue
+        cmdline = " ".join(ident["cmdline"])
+        for pattern in patterns:
+            if pattern in cmdline:
+                result[pattern].append(ident)
+    for identities in result.values():
+        identities.sort(key=lambda item: (item["pid"], item["starttime"]))
+    return result
+
+
 def add_lstart(
     identities: dict[str, list[dict[str, Any]]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -251,10 +310,67 @@ def add_lstart(
 
 def identity_signature(
     items: list[dict[str, Any]],
+) -> tuple[tuple[int, int], ...]:
+    return tuple((x["pid"], x["starttime"]) for x in items)
+
+
+def parent_signature(
+    items: list[dict[str, Any]],
 ) -> tuple[tuple[int, int, int], ...]:
     return tuple(
-        (x["pid"], x["ppid"], x["starttime"]) for x in items
+        (x["pid"], x["starttime"], x["ppid"]) for x in items
     )
+
+
+def process_ancestry(pid: int, max_depth: int = 16) -> list[dict[str, Any]]:
+    chain: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current = pid
+    for _ in range(max_depth):
+        if current <= 0 or current in seen:
+            break
+        seen.add(current)
+        ident = proc_identity(current)
+        if ident is None:
+            break
+        chain.append(ident)
+        if ident["ppid"] in (0, current):
+            break
+        current = ident["ppid"]
+    return chain
+
+
+def process_topology(
+    roles: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    gwc = {
+        str(item["pid"]): process_ancestry(item["pid"])
+        for item in roles.get("gwc_mcp", [])
+    }
+    tunnel = {
+        str(item["pid"]): process_ancestry(item["pid"])
+        for item in roles.get("tunnel_client", [])
+    }
+    return {
+        "gwc_ancestry": gwc,
+        "tunnel_ancestry": tunnel,
+    }
+
+
+def recorder_independence() -> dict[str, Any]:
+    chain = process_ancestry(os.getpid())
+    runtime_ancestors: list[dict[str, Any]] = []
+    for ident in chain[1:]:
+        if matches_role("gwc_mcp", ident) or matches_role(
+            "tunnel_client", ident
+        ):
+            runtime_ancestors.append(ident)
+    return {
+        "recorder": proc_identity(os.getpid()),
+        "ancestry": chain,
+        "independent_of_gwc_and_tunnel": not runtime_ancestors,
+        "runtime_ancestors": runtime_ancestors,
+    }
 
 
 def read_health_base(path: Path) -> tuple[str | None, str | None]:
@@ -396,7 +512,7 @@ def nm_active_snapshot() -> dict[str, Any]:
             "nmcli",
             "-t",
             "-f",
-            "NAME,TYPE,DEVICE",
+            "TYPE,DEVICE",
             "connection",
             "show",
             "--active",
@@ -413,7 +529,7 @@ def nm_active_snapshot() -> dict[str, Any]:
     }
 
 
-def spawn_monitor(
+def spawn_raw_monitor(
     args: list[str], output_path: Path
 ) -> subprocess.Popen[str] | None:
     try:
@@ -429,7 +545,13 @@ def spawn_monitor(
         return proc
     except Exception as exc:
         output_path.write_text(
-            f"monitor launch failed: {type(exc).__name__}: {exc}\n"
+            json_line(
+                {
+                    "monitor_launch_error": sanitize_text(
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                }
+            )
         )
         return None
 
@@ -454,6 +576,119 @@ def stop_monitor(proc: subprocess.Popen[str] | None) -> None:
             pass
 
 
+class SanitizedJournalFollower:
+    def __init__(self, unit: str, output_path: Path) -> None:
+        self.unit = unit
+        self.output_path = output_path
+        self.proc: subprocess.Popen[str] | None = None
+        self.thread: threading.Thread | None = None
+        self.stop_event = threading.Event()
+        self.returncode: int | None = None
+
+    def start(self) -> None:
+        try:
+            self.proc = subprocess.Popen(
+                [
+                    "journalctl",
+                    "-f",
+                    "-o",
+                    "json",
+                    "--since",
+                    "now",
+                    "-u",
+                    self.unit,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=safe_subprocess_env(),
+                bufsize=1,
+            )
+            self.thread = threading.Thread(
+                target=self._pump,
+                name=f"wave0-journal-{self.unit}",
+                daemon=True,
+            )
+            self.thread.start()
+        except Exception as exc:
+            self.output_path.write_text(
+                json_line(
+                    {
+                        "journal_launch_error": sanitize_text(
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "unit": self.unit,
+                    }
+                )
+            )
+
+    def _pump(self) -> None:
+        try:
+            with self.output_path.open("w") as dst:
+                assert self.proc is not None
+                assert self.proc.stdout is not None
+                while not self.stop_event.is_set():
+                    line = self.proc.stdout.readline()
+                    if not line:
+                        if self.proc.poll() is not None:
+                            break
+                        self.stop_event.wait(0.05)
+                        continue
+                    try:
+                        raw = json.loads(line)
+                        event = {
+                            "realtime_timestamp": raw.get(
+                                "__REALTIME_TIMESTAMP"
+                            ),
+                            "unit": raw.get("_SYSTEMD_UNIT", self.unit),
+                            "priority": raw.get("PRIORITY"),
+                            "message": sanitize_text(
+                                str(raw.get("MESSAGE", ""))
+                            ),
+                            "recorder_seen_epoch_ms": now_epoch_ms(),
+                        }
+                    except json.JSONDecodeError:
+                        event = {
+                            "unit": self.unit,
+                            "recorder_seen_epoch_ms": now_epoch_ms(),
+                            "parse_error": "journal line omitted",
+                        }
+                    dst.write(json_line(event))
+                    dst.flush()
+        except Exception as exc:
+            try:
+                with self.output_path.open("a") as dst:
+                    dst.write(
+                        json_line(
+                            {
+                                "unit": self.unit,
+                                "journal_pump_error": sanitize_text(
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                                "recorder_seen_epoch_ms": now_epoch_ms(),
+                            }
+                        )
+                    )
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self.proc.kill()
+                    self.proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            self.returncode = self.proc.returncode
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
+
 def tail_tunnel_events(
     source: Path, destination: Path, stop: threading.Event
 ) -> None:
@@ -470,7 +705,7 @@ def tail_tunnel_events(
                 try:
                     obj = json.loads(line)
                     filtered = {
-                        key: value
+                        key: sanitize_value(value)
                         for key, value in obj.items()
                         if key in TUNNEL_EVENT_KEYS
                         and not SENSITIVE_RE.search(key)
@@ -495,7 +730,9 @@ def tail_tunnel_events(
             json_line(
                 {
                     "recorder_seen_epoch_ms": now_epoch_ms(),
-                    "tail_error": f"{type(exc).__name__}: {exc}",
+                    "tail_error": sanitize_text(
+                        f"{type(exc).__name__}: {exc}"
+                    ),
                 }
             )
         )
@@ -504,6 +741,50 @@ def tail_tunnel_events(
 def safe_command_version(args: list[str]) -> str | None:
     result = run_local(args, timeout=0.5)
     return result["stdout"] if result["ok"] else None
+
+
+def project_runtime_status(raw: dict[str, Any]) -> dict[str, Any]:
+    local = raw.get("local") if isinstance(raw.get("local"), dict) else {}
+    effective = (
+        local.get("effective_health")
+        if isinstance(local.get("effective_health"), dict)
+        else {}
+    )
+    process = raw.get("process") if isinstance(raw.get("process"), dict) else {}
+    tmux = raw.get("tmux") if isinstance(raw.get("tmux"), dict) else {}
+
+    return sanitize_value(
+        {
+            "alias": raw.get("alias"),
+            "healthy": raw.get("healthy"),
+            "ready": raw.get("ready"),
+            "process_running": raw.get("process_running"),
+            "runtime_state": raw.get("runtime_state"),
+            "stale": raw.get("stale"),
+            "control_plane_poll_health": raw.get(
+                "control_plane_poll_health"
+            ),
+            "local": {
+                "control_plane_poll_health": local.get(
+                    "control_plane_poll_health"
+                ),
+                "effective_health": {
+                    "base_url": effective.get("base_url"),
+                    "healthz": effective.get("healthz"),
+                    "readyz": effective.get("readyz"),
+                },
+            },
+            "process": {
+                "started_at": process.get("started_at"),
+                "mode": process.get("mode"),
+                "target_kind": process.get("target_kind"),
+            },
+            "tmux": {
+                "running": tmux.get("running"),
+                "session_name": tmux.get("session_name"),
+            },
+        }
+    )
 
 
 def capture_runtime_status(path: Path) -> None:
@@ -527,25 +808,13 @@ def capture_runtime_status(path: Path) -> None:
     if result["ok"]:
         try:
             raw = json.loads(result["stdout"])
-            if isinstance(raw, dict):
-                local = raw.get("local")
-                if isinstance(local, dict):
-                    local = dict(local)
-                    log = local.get("log")
-                    if isinstance(log, dict):
-                        log = dict(log)
-                        log.pop("tail", None)
-                        local["log"] = log
-                    raw["local"] = local
-                raw.pop("repair_command", None)
-                raw.pop("remote_lookup_auth_ref", None)
-            payload["status"] = raw
-        except json.JSONDecodeError:
-            payload["parse_error"] = (
-                "runtime status was not valid JSON"
-            )
+            if not isinstance(raw, dict):
+                raise ValueError("runtime status root was not an object")
+            payload["status"] = project_runtime_status(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            payload["parse_error"] = sanitize_text(str(exc))
     else:
-        payload["error"] = result["stderr"][-1000:]
+        payload["error"] = sanitize_text(result["stderr"][-1000:])
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
@@ -555,6 +824,7 @@ def write_metadata(
     path: Path,
     args: argparse.Namespace,
     initial_roles: dict[str, list[dict[str, Any]]],
+    independence: dict[str, Any],
 ) -> None:
     meta = {
         "schema": 1,
@@ -570,6 +840,8 @@ def write_metadata(
         "health_url_file": str(args.health_url_file),
         "tunnel_log_source": str(args.tunnel_log),
         "target_interfaces": list(TARGET_INTERFACES),
+        "watch_patterns": list(args.watch_pattern),
+        "recorder_independence": independence,
         "versions": {
             "python": sys.version.split()[0],
             "kernel": platform.release(),
@@ -579,6 +851,7 @@ def write_metadata(
             "herdr": safe_command_version(["herdr", "--version"]),
         },
         "initial_processes": add_lstart(initial_roles),
+        "initial_topology": process_topology(initial_roles),
         "notes": [
             "No environment variables are captured.",
             (
@@ -588,6 +861,14 @@ def write_metadata(
             (
                 "Tunnel log capture is a whitelist projection; "
                 "raw tunnel log lines are not copied."
+            ),
+            (
+                "NetworkManager and Proton journal capture is projected "
+                "to timestamp/unit/priority/message and text-redacted."
+            ),
+            (
+                "Runtime status is projected to local process/health/"
+                "control-plane observability fields only."
             ),
             (
                 "Local /healthz and /readyz are loopback observations, "
@@ -609,6 +890,15 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--label", default="")
     parser.add_argument(
+        "--watch-pattern",
+        action="append",
+        default=[],
+        help=(
+            "Record identities for any process whose sanitized cmdline contains "
+            "this non-secret tag. May be repeated."
+        ),
+    )
+    parser.add_argument(
         "--health-url-file",
         type=Path,
         default=DEFAULT_HEALTH_URL_FILE,
@@ -622,55 +912,51 @@ def main() -> int:
         parser.error("--duration must be > 0")
     if args.interval_ms < 100:
         parser.error("--interval-ms must be >= 100")
+    for pattern in args.watch_pattern:
+        if not pattern or SENSITIVE_RE.search(pattern):
+            parser.error(
+                "--watch-pattern must be a non-empty, non-sensitive tag"
+            )
+
+    independence = recorder_independence()
+    if not independence["independent_of_gwc_and_tunnel"]:
+        parser.error(
+            "recorder is owned by the GWC/tunnel process tree; "
+            "launch it from an independent Herdr pane"
+        )
 
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
 
     initial_roles = process_roles()
-    write_metadata(out / "metadata.json", args, initial_roles)
+    write_metadata(
+        out / "metadata.json", args, initial_roles, independence
+    )
     capture_runtime_status(out / "runtime-status-before.json")
 
-    monitors = {
-        "ip": spawn_monitor(
-            [
-                "stdbuf",
-                "-oL",
-                "ip",
-                "-ts",
-                "monitor",
-                "link",
-                "route",
-                "rule",
-            ],
-            out / "ip-monitor.log",
+    ip_monitor = spawn_raw_monitor(
+        [
+            "stdbuf",
+            "-oL",
+            "ip",
+            "-ts",
+            "monitor",
+            "link",
+            "route",
+            "rule",
+        ],
+        out / "ip-monitor.log",
+    )
+    journal_followers = {
+        "networkmanager": SanitizedJournalFollower(
+            "NetworkManager.service", out / "journal-network.ndjson"
         ),
-        "networkmanager": spawn_monitor(
-            [
-                "journalctl",
-                "-f",
-                "-o",
-                "short-iso-precise",
-                "--since",
-                "now",
-                "-u",
-                "NetworkManager.service",
-            ],
-            out / "journal-network.log",
-        ),
-        "proton": spawn_monitor(
-            [
-                "journalctl",
-                "-f",
-                "-o",
-                "short-iso-precise",
-                "--since",
-                "now",
-                "-u",
-                "proton.VPN.service",
-            ],
-            out / "journal-proton.log",
+        "proton": SanitizedJournalFollower(
+            "proton.VPN.service", out / "journal-proton.ndjson"
         ),
     }
+    for follower in journal_followers.values():
+        follower.start()
 
     tail_stop = threading.Event()
     tail_thread = threading.Thread(
@@ -688,8 +974,12 @@ def main() -> int:
     samples = (out / "samples.ndjson").open("w")
     health_samples = (out / "tunnel-health.ndjson").open("w")
 
-    previous = {
+    previous_identity = {
         role: identity_signature(items)
+        for role, items in initial_roles.items()
+    }
+    previous_parent = {
+        role: parent_signature(items)
         for role, items in initial_roles.items()
     }
     process_events.write(
@@ -699,6 +989,7 @@ def main() -> int:
                 "human": now_human(),
                 "event": "initial",
                 "roles": add_lstart(initial_roles),
+                "topology": process_topology(initial_roles),
             }
         )
     )
@@ -714,25 +1005,47 @@ def main() -> int:
         while time.monotonic() < deadline:
             roles = process_roles()
             for role, items in roles.items():
-                sig = identity_signature(items)
-                if sig != previous.get(role, ()):
+                identity_sig = identity_signature(items)
+                parent_sig = parent_signature(items)
+                if identity_sig != previous_identity.get(role, ()):
                     process_events.write(
                         json_line(
                             {
                                 "epoch_ms": now_epoch_ms(),
                                 "human": now_human(),
-                                "event": "identity_change",
+                                "event": "process_identity_change",
                                 "role": role,
-                                "before": previous.get(role, ()),
-                                "after": sig,
+                                "before": previous_identity.get(role, ()),
+                                "after": identity_sig,
                                 "identities": add_lstart(
                                     {role: items}
                                 )[role],
+                                "topology": process_topology(roles),
                             }
                         )
                     )
                     process_events.flush()
-                    previous[role] = sig
+                    previous_identity[role] = identity_sig
+                    previous_parent[role] = parent_sig
+                elif parent_sig != previous_parent.get(role, ()):
+                    process_events.write(
+                        json_line(
+                            {
+                                "epoch_ms": now_epoch_ms(),
+                                "human": now_human(),
+                                "event": "parent_relationship_change",
+                                "role": role,
+                                "before": previous_parent.get(role, ()),
+                                "after": parent_sig,
+                                "identities": add_lstart(
+                                    {role: items}
+                                )[role],
+                                "topology": process_topology(roles),
+                            }
+                        )
+                    )
+                    process_events.flush()
+                    previous_parent[role] = parent_sig
 
             tunnel_pids = {
                 item["pid"] for item in roles["tunnel_client"]
@@ -760,6 +1073,10 @@ def main() -> int:
                     3,
                 ),
                 "processes": roles,
+                "watched_processes": watched_processes(
+                    args.watch_pattern,
+                    exclude_pids={os.getpid()},
+                ),
                 "network": {
                     "default_route_ipv4": ip_output(
                         ["-4", "route", "show", "default"]
@@ -823,8 +1140,9 @@ def main() -> int:
         process_events.close()
         tail_stop.set()
         tail_thread.join(timeout=1.0)
-        for proc in monitors.values():
-            stop_monitor(proc)
+        stop_monitor(ip_monitor)
+        for follower in journal_followers.values():
+            follower.stop()
         capture_runtime_status(
             out / "runtime-status-after.json"
         )
@@ -839,9 +1157,14 @@ def main() -> int:
             ),
             "sample_count": sample_index,
             "final_processes": add_lstart(final_roles),
+            "final_topology": process_topology(final_roles),
+            "recorder_final_identity": proc_identity(os.getpid()),
             "monitor_returncodes": {
-                key: None if proc is None else proc.returncode
-                for key, proc in monitors.items()
+                "ip": None if ip_monitor is None else ip_monitor.returncode,
+                **{
+                    key: follower.returncode
+                    for key, follower in journal_followers.items()
+                },
             },
         }
         (out / "recorder-result.json").write_text(
