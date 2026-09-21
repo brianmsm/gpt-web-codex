@@ -445,6 +445,10 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("external MCP namespace");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
+    expect(client.getInstructions()).toContain("Herdr panes contain persistent shells");
+    expect(client.getInstructions()).toContain("__HERDR_CMD_DONE__:%d");
+    expect(client.getInstructions()).toContain("pane health says whether the shell is alive, not whether the last command is still running");
+    expect(client.getInstructions()).toContain("Do not keep waiting for a success-specific output string after the shell prompt has returned");
     expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
     expect(client.getInstructions()).not.toMatch(/[\u3400-\u9fff]/);
     const listedTools = (await client.listTools()).tools;
@@ -484,10 +488,16 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     });
     const herdrRead = listedTools.find(tool => tool.name === "herdr_pane_read");
     const herdrRun = listedTools.find(tool => tool.name === "herdr_pane_run");
+    const herdrWait = listedTools.find(tool => tool.name === "herdr_pane_wait");
     const herdrSend = listedTools.find(tool => tool.name === "herdr_pane_send");
     const herdrWorkspaceOpen = listedTools.find(tool => tool.name === "herdr_workspace_open");
     expect(herdrRead?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    expect(herdrRun?.description).toContain("a healthy pane means the shell is alive, not that the last command is still running");
+    expect(herdrRun?.description).toContain("__HERDR_CMD_DONE__:%d");
+    expect(herdrWait?.description).toContain("does not track the lifecycle of a shell command");
+    expect(herdrWait?.description).toContain("prefer an explicit unconditional completion sentinel");
+    expect(herdrWait?.description).toContain("Do not keep waiting for a success-specific output string");
     expect(herdrSend?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     expect(herdrSend?.inputSchema).toMatchObject({
       properties: {

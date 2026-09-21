@@ -178,7 +178,7 @@ export function registerHerdrTools(server: McpServer, herdr: HerdrClient): void 
 
   server.registerTool("herdr_pane_run", {
     title: "Run a command in a Herdr pane",
-    description: "Send an arbitrary shell command plus Enter to an explicit scoped Herdr pane PTY. Disabled in read-only mode. The process remains owned by Herdr and can persist independently of this GWC process.",
+    description: "Send an arbitrary shell command plus Enter to an explicit scoped Herdr pane PTY. Disabled in read-only mode. Herdr panes contain persistent shells: a healthy pane means the shell is alive, not that the last command is still running. For finite non-interactive commands whose completion must be observed, emit an unconditional completion sentinel carrying the exit status (for example: if <command>; then rc=0; else rc=$?; fi; printf '\\n__HERDR_CMD_DONE__:%d\\n' \"$rc\") and then wait for that sentinel before reading the final output. Do not infer command liveness solely from pane health. The process remains owned by Herdr and can persist independently of this GWC process.",
     inputSchema: {
       session: sessionName,
       pane_id: herdrId,
@@ -232,7 +232,7 @@ export function registerHerdrTools(server: McpServer, herdr: HerdrClient): void 
 
   server.registerTool("herdr_pane_wait", {
     title: "Wait for Herdr pane output",
-    description: "Use Herdr's own wait-for-output mechanism for an explicit scoped pane instead of aggressive GWC polling. A timeout is observational and never triggers cleanup or process termination.",
+    description: "Use Herdr's own wait-for-output mechanism for an explicit scoped pane instead of aggressive GWC polling. This waits for output matching a condition; it does not track the lifecycle of a shell command. In a persistent shell, prefer an explicit unconditional completion sentinel carrying the command exit status for finite commands. Do not keep waiting for a success-specific output string after the command has already returned to the shell prompt, and do not infer command liveness solely from pane health. A timeout is observational and never triggers cleanup or process termination.",
     inputSchema: {
       session: sessionName,
       pane_id: herdrId,
