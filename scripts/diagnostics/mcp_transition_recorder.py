@@ -461,6 +461,8 @@ def evaluate_transition_evidence(
     evaluated_episodes: list[dict[str, Any]] = []
     for raw in outage_episodes:
         episode = dict(raw)
+        episode.pop("sustained", None)
+        episode.pop("proton_temporally_associated", None)
         first_unreachable = episode.get("first_unreachable_epoch_ms")
         last_unreachable = episode.get("last_unreachable_epoch_ms")
         first_reachable_after = episode.get(
