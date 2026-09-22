@@ -40,3 +40,6 @@ webgpt-session-e2e-*.txt
 **/storage-state*.json
 **/launcher-browser.json
 **/runtime-key*
+
+# Local runtime evidence for resilient MCP transport Wave 1.
+/diagnostics/wave1-runs/

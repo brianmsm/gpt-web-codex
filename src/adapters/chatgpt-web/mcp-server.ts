@@ -15,6 +15,7 @@ import {
 } from "../../standalone/image-preview";
 import { LunaJobManager } from "../../standalone/luna-jobs";
 import { HerdrClient } from "../../standalone/herdr-client";
+import { McpRequestTracer, terminalExecTraceIdentity } from "./mcp-request-trace";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
 import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
 import {
@@ -263,6 +264,7 @@ export async function runChatGptMcpServer(options: {
   const direct = new DirectToolService();
   const herdr = options.herdrClient ?? new HerdrClient();
   const imagePreviews = new ImagePreviewCache(options.statePath);
+  const requestTrace = McpRequestTracer.fromEnvironment();
   const server = new McpServer(
     { name: "gpt-web-codex", version: VERSION },
     { instructions: MCP_SERVER_INSTRUCTIONS },
@@ -788,9 +790,18 @@ export async function runChatGptMcpServer(options: {
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     _meta: { securitySchemes: noAuth },
-  }, async input => {
+  }, async (input, extra) => {
+    const traceIdentity = terminalExecTraceIdentity(input);
+    requestTrace.recordTerminalExec("received", extra.requestId, traceIdentity);
     const started = direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode);
-    return result(publicTerminal(await direct.waitTerminal(started.id, input.wait_timeout_ms)));
+    requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started);
+    const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms);
+    if (completed.status !== "running") {
+      requestTrace.recordTerminalExec("execution_finished", extra.requestId, traceIdentity, completed);
+    }
+    const response = result(publicTerminal(completed));
+    requestTrace.recordTerminalExec("response_returned", extra.requestId, traceIdentity, completed);
+    return response;
   });
 
   server.registerTool("terminal_status", {
