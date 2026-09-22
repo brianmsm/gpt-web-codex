@@ -207,18 +207,20 @@ not the sleep itself.
     Connect reproduction must finish with
     `recorder-result.json -> transition_evidence.transition_valid = true`.
     The validity rule requires all of the following:
-    - initial `proton0` absent and final `proton0` present;
-    - a sustained public-reachability outage lasting at least 2,000 ms with
-      multiple unreachable samples and an observed recovery;
-    - that outage starts before the first appearance of `proton0`, and
-      `proton0` appears either during it or no more than 3,000 ms after the
-      first recovered sample;
+    - initial `proton0` and `pvpnksintrf0` absent;
+    - a physical `pvpnksintrf0` window lasting at least 2,000 ms and later
+      disappearing again within the run;
+    - `proton0` first appearing while `pvpnksintrf0` is active and
+      remaining present at run end;
+    - at least two failed public-reachability samples while the kill-switch
+      interface is active, followed by restored reachability by run end;
     - an observed IPv4 default-route or `ip rule` change.
-    A TCP hiccup, an outage long before Proton, or an outage that begins after
-    `proton0` already appeared is not associated evidence. If no associated
-    outage satisfies these conditions, the run is **INVALID / NOT
-    CLASSIFIABLE**, regardless of PID stability or a manual Connect
-    instruction/confirmation.
+    TCP failures are impact evidence inside the physical Proton transition,
+    not the clock that defines the transition itself. Intermittent reachability
+    during a multi-second kill-switch window therefore remains a valid
+    reproduction, while a lone unrelated TCP hiccup does not. If these
+    physical conditions are not met, the run is **INVALID / NOT CLASSIFIABLE**,
+    regardless of PID stability or a manual Connect instruction/confirmation.
 
 ## Run 2: READ-ONLY around transition
 

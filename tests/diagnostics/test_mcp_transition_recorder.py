@@ -153,133 +153,145 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertIn("Authorization=<redacted>", sanitized)
         self.assertIn("<redacted>", sanitized)
 
-    def test_transition_validity_accepts_sustained_associated_outage(self):
+    def test_transition_validity_accepts_physical_kill_switch_window(self):
         evidence = RECORDER.evaluate_transition_evidence(
             initial_proton_present=False,
             final_proton_present=True,
-            proton_first_seen_epoch_ms=15_000,
+            proton_first_seen_epoch_ms=10_500,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=10_000,
+            kill_switch_first_absent_after_seen_epoch_ms=17_500,
+            kill_switch_unreachable_sample_count=6,
+            final_reachable=True,
             outage_episodes=[
                 {
                     "last_reachable_before_epoch_ms": 9_750,
-                    "first_unreachable_epoch_ms": 10_000,
-                    "last_unreachable_epoch_ms": 17_750,
-                    "unreachable_sample_count": 32,
-                    "first_reachable_after_epoch_ms": 18_000,
-                }
+                    "first_unreachable_epoch_ms": 10_250,
+                    "last_unreachable_epoch_ms": 10_500,
+                    "unreachable_sample_count": 2,
+                    "first_reachable_after_epoch_ms": 10_750,
+                },
+                {
+                    "last_reachable_before_epoch_ms": 12_750,
+                    "first_unreachable_epoch_ms": 13_000,
+                    "last_unreachable_epoch_ms": 13_250,
+                    "unreachable_sample_count": 2,
+                    "first_reachable_after_epoch_ms": 13_500,
+                },
             ],
-            ipv4_default_changed=False,
+            ipv4_default_changed=True,
             ip_rule_changed=True,
         )
         self.assertTrue(evidence["transition_valid"])
         self.assertTrue(evidence["classification_allowed"])
-        self.assertEqual(evidence["associated_outage_index"], 0)
-        self.assertTrue(evidence["outage_episodes"][0]["sustained"])
-        self.assertTrue(
-            evidence["outage_episodes"][0][
-                "proton_temporally_associated"
-            ]
-        )
+        self.assertEqual(evidence["kill_switch_window_ms"], 7_500)
+        self.assertTrue(evidence["kill_switch_sustained"])
+        self.assertTrue(evidence["proton_during_kill_switch"])
+        self.assertTrue(evidence["reachability_impact_observed"])
 
-    def test_transition_validity_rejects_unrelated_earlier_outage(self):
+    def test_transition_validity_rejects_missing_kill_switch(self):
         evidence = RECORDER.evaluate_transition_evidence(
             initial_proton_present=False,
             final_proton_present=True,
-            proton_first_seen_epoch_ms=60_000,
-            outage_episodes=[
-                {
-                    "last_reachable_before_epoch_ms": 9_750,
-                    "first_unreachable_epoch_ms": 10_000,
-                    "last_unreachable_epoch_ms": 17_750,
-                    "unreachable_sample_count": 32,
-                    "first_reachable_after_epoch_ms": 18_000,
-                }
-            ],
+            proton_first_seen_epoch_ms=10_500,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=None,
+            kill_switch_first_absent_after_seen_epoch_ms=None,
+            kill_switch_unreachable_sample_count=4,
+            final_reachable=True,
+            outage_episodes=[],
             ipv4_default_changed=True,
             ip_rule_changed=True,
         )
         self.assertFalse(evidence["transition_valid"])
-        self.assertIsNone(evidence["associated_outage_index"])
+        self.assertIn("pvpnksintrf0 was never observed", evidence["invalid_reasons"])
 
-    def test_transition_validity_rejects_outage_after_proton(self):
+    def test_transition_validity_rejects_short_kill_switch_window(self):
         evidence = RECORDER.evaluate_transition_evidence(
             initial_proton_present=False,
             final_proton_present=True,
-            proton_first_seen_epoch_ms=10_000,
-            outage_episodes=[
-                {
-                    "last_reachable_before_epoch_ms": 59_750,
-                    "first_unreachable_epoch_ms": 60_000,
-                    "last_unreachable_epoch_ms": 67_750,
-                    "unreachable_sample_count": 32,
-                    "first_reachable_after_epoch_ms": 68_000,
-                }
-            ],
+            proton_first_seen_epoch_ms=10_300,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=10_000,
+            kill_switch_first_absent_after_seen_epoch_ms=10_750,
+            kill_switch_unreachable_sample_count=2,
+            final_reachable=True,
+            outage_episodes=[],
             ipv4_default_changed=True,
             ip_rule_changed=True,
         )
         self.assertFalse(evidence["transition_valid"])
-        self.assertIsNone(evidence["associated_outage_index"])
+        self.assertFalse(evidence["kill_switch_sustained"])
+
+    def test_transition_validity_rejects_proton_outside_kill_switch(self):
+        evidence = RECORDER.evaluate_transition_evidence(
+            initial_proton_present=False,
+            final_proton_present=True,
+            proton_first_seen_epoch_ms=20_000,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=10_000,
+            kill_switch_first_absent_after_seen_epoch_ms=17_500,
+            kill_switch_unreachable_sample_count=6,
+            final_reachable=True,
+            outage_episodes=[],
+            ipv4_default_changed=True,
+            ip_rule_changed=True,
+        )
+        self.assertFalse(evidence["transition_valid"])
+        self.assertFalse(evidence["proton_during_kill_switch"])
 
     def test_transition_validity_rejects_single_tcp_hiccup(self):
         evidence = RECORDER.evaluate_transition_evidence(
             initial_proton_present=False,
             final_proton_present=True,
-            proton_first_seen_epoch_ms=9_700,
+            proton_first_seen_epoch_ms=10_500,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=10_000,
+            kill_switch_first_absent_after_seen_epoch_ms=17_500,
+            kill_switch_unreachable_sample_count=1,
+            final_reachable=True,
             outage_episodes=[
                 {
-                    "last_reachable_before_epoch_ms": 9_250,
-                    "first_unreachable_epoch_ms": 9_500,
-                    "last_unreachable_epoch_ms": 9_500,
+                    "last_reachable_before_epoch_ms": 10_000,
+                    "first_unreachable_epoch_ms": 10_250,
+                    "last_unreachable_epoch_ms": 10_250,
                     "unreachable_sample_count": 1,
-                    "first_reachable_after_epoch_ms": 9_750,
+                    "first_reachable_after_epoch_ms": 10_500,
                 }
             ],
             ipv4_default_changed=True,
             ip_rule_changed=True,
         )
         self.assertFalse(evidence["transition_valid"])
-        self.assertFalse(evidence["outage_episodes"][0]["sustained"])
+        self.assertFalse(evidence["reachability_impact_observed"])
 
-    def test_transition_validity_accepts_immediately_preceding_outage(self):
+    def test_transition_validity_requires_routing_and_recovery(self):
         evidence = RECORDER.evaluate_transition_evidence(
             initial_proton_present=False,
             final_proton_present=True,
-            proton_first_seen_epoch_ms=20_000,
-            outage_episodes=[
-                {
-                    "last_reachable_before_epoch_ms": 9_750,
-                    "first_unreachable_epoch_ms": 10_000,
-                    "last_unreachable_epoch_ms": 17_750,
-                    "unreachable_sample_count": 32,
-                    "first_reachable_after_epoch_ms": 18_000,
-                }
-            ],
-            ipv4_default_changed=True,
-            ip_rule_changed=False,
-        )
-        self.assertTrue(evidence["transition_valid"])
-        self.assertEqual(evidence["associated_outage_index"], 0)
-
-    def test_transition_validity_requires_routing_evidence(self):
-        evidence = RECORDER.evaluate_transition_evidence(
-            initial_proton_present=False,
-            final_proton_present=True,
-            proton_first_seen_epoch_ms=15_000,
-            outage_episodes=[
-                {
-                    "last_reachable_before_epoch_ms": 9_750,
-                    "first_unreachable_epoch_ms": 10_000,
-                    "last_unreachable_epoch_ms": 17_750,
-                    "unreachable_sample_count": 32,
-                    "first_reachable_after_epoch_ms": 18_000,
-                }
-            ],
+            proton_first_seen_epoch_ms=10_500,
+            initial_kill_switch_present=False,
+            final_kill_switch_present=False,
+            kill_switch_first_seen_epoch_ms=10_000,
+            kill_switch_first_absent_after_seen_epoch_ms=17_500,
+            kill_switch_unreachable_sample_count=6,
+            final_reachable=False,
+            outage_episodes=[],
             ipv4_default_changed=False,
             ip_rule_changed=False,
         )
         self.assertFalse(evidence["transition_valid"])
         self.assertIn(
             "no IPv4-default-route or ip-rule change was observed",
+            evidence["invalid_reasons"],
+        )
+        self.assertIn(
+            "public reachability was not restored by run end",
             evidence["invalid_reasons"],
         )
 

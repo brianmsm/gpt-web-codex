@@ -29,9 +29,8 @@ DEFAULT_TUNNEL_LOG = Path(
     "/home/brian/.local/state/tunnel-client/logs/codex-chatgpt-web.log"
 )
 TARGET_INTERFACES = ("wlp99s0", "proton0", "pvpnksintrf0")
-MIN_ASSOCIATED_OUTAGE_MS = 2_000
-MIN_ASSOCIATED_OUTAGE_SAMPLES = 4
-MAX_OUTAGE_END_TO_PROTON_MS = 3_000
+MIN_KILL_SWITCH_WINDOW_MS = 2_000
+MIN_KILL_SWITCH_UNREACHABLE_SAMPLES = 2
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|api[_-]?key|token|secret|password|credential)"
 )
@@ -445,77 +444,100 @@ def evaluate_transition_evidence(
     initial_proton_present: bool | None,
     final_proton_present: bool | None,
     proton_first_seen_epoch_ms: int | None,
+    initial_kill_switch_present: bool | None,
+    final_kill_switch_present: bool | None,
+    kill_switch_first_seen_epoch_ms: int | None,
+    kill_switch_first_absent_after_seen_epoch_ms: int | None,
+    kill_switch_unreachable_sample_count: int,
+    final_reachable: bool | None,
     outage_episodes: list[dict[str, Any]],
     ipv4_default_changed: bool,
     ip_rule_changed: bool,
-    min_outage_ms: int = MIN_ASSOCIATED_OUTAGE_MS,
-    min_outage_samples: int = MIN_ASSOCIATED_OUTAGE_SAMPLES,
-    max_outage_end_to_proton_ms: int = MAX_OUTAGE_END_TO_PROTON_MS,
+    min_kill_switch_window_ms: int = MIN_KILL_SWITCH_WINDOW_MS,
+    min_kill_switch_unreachable_samples: int = (
+        MIN_KILL_SWITCH_UNREACHABLE_SAMPLES
+    ),
 ) -> dict[str, Any]:
     evaluated_episodes: list[dict[str, Any]] = []
-    associated_outage_index: int | None = None
-
-    for index, raw in enumerate(outage_episodes):
+    for raw in outage_episodes:
         episode = dict(raw)
         first_unreachable = episode.get("first_unreachable_epoch_ms")
         last_unreachable = episode.get("last_unreachable_epoch_ms")
         first_reachable_after = episode.get(
             "first_reachable_after_epoch_ms"
         )
-        sample_count = int(episode.get("unreachable_sample_count") or 0)
-
         duration_ms: int | None = None
         if isinstance(first_unreachable, int):
             if isinstance(first_reachable_after, int):
                 duration_ms = first_reachable_after - first_unreachable
             elif isinstance(last_unreachable, int):
                 duration_ms = last_unreachable - first_unreachable
-
-        sustained = bool(
-            duration_ms is not None
-            and duration_ms >= min_outage_ms
-            and sample_count >= min_outage_samples
-            and isinstance(first_reachable_after, int)
-        )
-
-        proton_temporally_associated = False
-        if (
-            sustained
-            and isinstance(first_unreachable, int)
-            and isinstance(first_reachable_after, int)
-            and isinstance(proton_first_seen_epoch_ms, int)
-        ):
-            proton_temporally_associated = bool(
-                first_unreachable <= proton_first_seen_epoch_ms
-                <= first_reachable_after + max_outage_end_to_proton_ms
-            )
-
         episode["duration_ms"] = duration_ms
-        episode["sustained"] = sustained
-        episode["proton_temporally_associated"] = (
-            proton_temporally_associated
-        )
         evaluated_episodes.append(episode)
 
-        if proton_temporally_associated and associated_outage_index is None:
-            associated_outage_index = index
+    kill_switch_window_ms: int | None = None
+    if (
+        isinstance(kill_switch_first_seen_epoch_ms, int)
+        and isinstance(kill_switch_first_absent_after_seen_epoch_ms, int)
+    ):
+        kill_switch_window_ms = (
+            kill_switch_first_absent_after_seen_epoch_ms
+            - kill_switch_first_seen_epoch_ms
+        )
 
+    kill_switch_sustained = bool(
+        kill_switch_window_ms is not None
+        and kill_switch_window_ms >= min_kill_switch_window_ms
+    )
+    proton_during_kill_switch = bool(
+        isinstance(proton_first_seen_epoch_ms, int)
+        and isinstance(kill_switch_first_seen_epoch_ms, int)
+        and isinstance(kill_switch_first_absent_after_seen_epoch_ms, int)
+        and kill_switch_first_seen_epoch_ms
+        <= proton_first_seen_epoch_ms
+        <= kill_switch_first_absent_after_seen_epoch_ms
+    )
+    reachability_impact_observed = (
+        kill_switch_unreachable_sample_count
+        >= min_kill_switch_unreachable_samples
+    )
     routing_transition_observed = bool(
         ipv4_default_changed or ip_rule_changed
     )
-    reasons: list[str] = []
 
+    reasons: list[str] = []
     if initial_proton_present is not False:
         reasons.append("run did not start with proton0 absent")
+    if initial_kill_switch_present is not False:
+        reasons.append("run did not start with pvpnksintrf0 absent")
     if proton_first_seen_epoch_ms is None:
         reasons.append("proton0 was never observed")
     if final_proton_present is not True:
         reasons.append("run did not end with proton0 present")
-    if associated_outage_index is None:
+    if kill_switch_first_seen_epoch_ms is None:
+        reasons.append("pvpnksintrf0 was never observed")
+    if kill_switch_first_absent_after_seen_epoch_ms is None:
         reasons.append(
-            "no sustained reachability outage was temporally associated "
-            "with the first appearance of proton0"
+            "pvpnksintrf0 disappearance after activation was not observed"
         )
+    if not kill_switch_sustained:
+        reasons.append(
+            "pvpnksintrf0 transition window was shorter than the "
+            f"{min_kill_switch_window_ms} ms minimum"
+        )
+    if not proton_during_kill_switch:
+        reasons.append(
+            "proton0 did not first appear during the pvpnksintrf0 window"
+        )
+    if final_kill_switch_present is not False:
+        reasons.append("run did not end with pvpnksintrf0 absent")
+    if not reachability_impact_observed:
+        reasons.append(
+            "insufficient public-reachability failures were observed "
+            "while pvpnksintrf0 was active"
+        )
+    if final_reachable is not True:
+        reasons.append("public reachability was not restored by run end")
     if not routing_transition_observed:
         reasons.append("no IPv4-default-route or ip-rule change was observed")
 
@@ -524,11 +546,25 @@ def evaluate_transition_evidence(
         "initial_proton_present": initial_proton_present,
         "proton_first_seen_epoch_ms": proton_first_seen_epoch_ms,
         "final_proton_present": final_proton_present,
+        "initial_kill_switch_present": initial_kill_switch_present,
+        "kill_switch_first_seen_epoch_ms": kill_switch_first_seen_epoch_ms,
+        "kill_switch_first_absent_after_seen_epoch_ms": (
+            kill_switch_first_absent_after_seen_epoch_ms
+        ),
+        "final_kill_switch_present": final_kill_switch_present,
+        "kill_switch_window_ms": kill_switch_window_ms,
+        "kill_switch_sustained": kill_switch_sustained,
+        "kill_switch_unreachable_sample_count": (
+            kill_switch_unreachable_sample_count
+        ),
+        "minimum_kill_switch_window_ms": min_kill_switch_window_ms,
+        "minimum_kill_switch_unreachable_samples": (
+            min_kill_switch_unreachable_samples
+        ),
+        "proton_during_kill_switch": proton_during_kill_switch,
+        "reachability_impact_observed": reachability_impact_observed,
+        "final_reachable": final_reachable,
         "outage_episodes": evaluated_episodes,
-        "associated_outage_index": associated_outage_index,
-        "minimum_associated_outage_ms": min_outage_ms,
-        "minimum_associated_outage_samples": min_outage_samples,
-        "max_outage_end_to_proton_ms": max_outage_end_to_proton_ms,
         "ipv4_default_changed": ipv4_default_changed,
         "ip_rule_changed": ip_rule_changed,
         "routing_transition_observed": routing_transition_observed,
@@ -1182,6 +1218,12 @@ def main() -> int:
     initial_proton_present: bool | None = None
     final_proton_present: bool | None = None
     proton_first_seen_epoch_ms: int | None = None
+    initial_kill_switch_present: bool | None = None
+    final_kill_switch_present: bool | None = None
+    kill_switch_first_seen_epoch_ms: int | None = None
+    kill_switch_first_absent_after_seen_epoch_ms: int | None = None
+    kill_switch_unreachable_sample_count = 0
+    final_reachable: bool | None = None
     initial_ipv4_default: str | None = None
     initial_ip_rule: str | None = None
     ipv4_default_changed = False
@@ -1294,6 +1336,9 @@ def main() -> int:
             }
 
             proton_present = sample["network"]["interfaces"]["proton0"]["exists"]
+            kill_switch_present = sample["network"]["interfaces"][
+                "pvpnksintrf0"
+            ]["exists"]
             reachable = sample["network"]["tcp_1_1_1_1_443"]["ok"]
             epoch_ms = sample["epoch_ms"]
             current_ipv4_default = sample["network"]["default_route_ipv4"]
@@ -1301,12 +1346,25 @@ def main() -> int:
 
             if sample_index == 0:
                 initial_proton_present = proton_present
+                initial_kill_switch_present = kill_switch_present
                 initial_ipv4_default = current_ipv4_default
                 initial_ip_rule = current_ip_rule
             final_proton_present = proton_present
+            final_kill_switch_present = kill_switch_present
+            final_reachable = reachable
 
             if proton_present and proton_first_seen_epoch_ms is None:
                 proton_first_seen_epoch_ms = epoch_ms
+            if kill_switch_present:
+                if kill_switch_first_seen_epoch_ms is None:
+                    kill_switch_first_seen_epoch_ms = epoch_ms
+                if not reachable:
+                    kill_switch_unreachable_sample_count += 1
+            elif (
+                kill_switch_first_seen_epoch_ms is not None
+                and kill_switch_first_absent_after_seen_epoch_ms is None
+            ):
+                kill_switch_first_absent_after_seen_epoch_ms = epoch_ms
 
             if (
                 initial_ipv4_default is not None
@@ -1386,6 +1444,18 @@ def main() -> int:
             initial_proton_present=initial_proton_present,
             final_proton_present=final_proton_present,
             proton_first_seen_epoch_ms=proton_first_seen_epoch_ms,
+            initial_kill_switch_present=initial_kill_switch_present,
+            final_kill_switch_present=final_kill_switch_present,
+            kill_switch_first_seen_epoch_ms=(
+                kill_switch_first_seen_epoch_ms
+            ),
+            kill_switch_first_absent_after_seen_epoch_ms=(
+                kill_switch_first_absent_after_seen_epoch_ms
+            ),
+            kill_switch_unreachable_sample_count=(
+                kill_switch_unreachable_sample_count
+            ),
+            final_reachable=final_reachable,
             outage_episodes=outage_episodes,
             ipv4_default_changed=ipv4_default_changed,
             ip_rule_changed=ip_rule_changed,
