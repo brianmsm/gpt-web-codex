@@ -80,6 +80,17 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertTrue(
             RECORDER.matches_role("tunnel_client", actual)
         )
+        self.assertFalse(
+            RECORDER.matches_role(
+                "tunnel_client", actual, expected_profile="wave1-diagnostic"
+            )
+        )
+        actual["cmdline"][-1] = "wave1-diagnostic"
+        self.assertTrue(
+            RECORDER.matches_role(
+                "tunnel_client", actual, expected_profile="wave1-diagnostic"
+            )
+        )
 
     def test_gwc_matcher_requires_structural_cli_shape(self):
         cli = "/tmp/install/app/cli.js"

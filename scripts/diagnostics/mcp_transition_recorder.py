@@ -225,7 +225,9 @@ def proc_identity(pid: int) -> dict[str, Any] | None:
         return None
 
 
-def matches_role(role: str, ident: dict[str, Any]) -> bool:
+def matches_role(
+    role: str, ident: dict[str, Any], expected_profile: str = EXPECTED_PROFILE
+) -> bool:
     parts = ident["cmdline"]
     if not parts:
         return False
@@ -236,7 +238,7 @@ def matches_role(role: str, ident: dict[str, Any]) -> bool:
             and len(parts) >= 2
             and parts[1] == "run"
             and "--profile" in parts
-            and EXPECTED_PROFILE in parts
+            and expected_profile in parts
         )
 
     if role == "gwc_mcp":
@@ -264,7 +266,9 @@ def matches_role(role: str, ident: dict[str, Any]) -> bool:
     return False
 
 
-def process_roles() -> dict[str, list[dict[str, Any]]]:
+def process_roles(
+    expected_profile: str = EXPECTED_PROFILE,
+) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {role: [] for role in ROLES}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -273,7 +277,7 @@ def process_roles() -> dict[str, list[dict[str, Any]]]:
         if not ident:
             continue
         for role in ROLES:
-            if matches_role(role, ident):
+            if matches_role(role, ident, expected_profile):
                 result[role].append(ident)
     for identities in result.values():
         identities.sort(key=lambda item: (item["pid"], item["starttime"]))
@@ -370,12 +374,13 @@ def process_topology(
 
 def assess_recorder_independence(
     chain: list[dict[str, Any]],
+    expected_profile: str = EXPECTED_PROFILE,
 ) -> dict[str, Any]:
     runtime_ancestors = [
         ident
         for ident in chain[1:]
-        if matches_role("gwc_mcp", ident)
-        or matches_role("tunnel_client", ident)
+        if matches_role("gwc_mcp", ident, expected_profile)
+        or matches_role("tunnel_client", ident, expected_profile)
     ]
     return {
         "recorder": chain[0] if chain else None,
@@ -385,8 +390,12 @@ def assess_recorder_independence(
     }
 
 
-def recorder_independence() -> dict[str, Any]:
-    return assess_recorder_independence(process_ancestry(os.getpid()))
+def recorder_independence(
+    expected_profile: str = EXPECTED_PROFILE,
+) -> dict[str, Any]:
+    return assess_recorder_independence(
+        process_ancestry(os.getpid()), expected_profile
+    )
 
 
 def validate_target_preconditions(
@@ -1111,26 +1120,33 @@ def main() -> int:
     parser.add_argument(
         "--tunnel-log", type=Path, default=DEFAULT_TUNNEL_LOG
     )
+    parser.add_argument(
+        "--expected-profile",
+        default=EXPECTED_PROFILE,
+        help="Exact tunnel-client --profile value required by the target matcher.",
+    )
     args = parser.parse_args()
 
     if args.duration <= 0:
         parser.error("--duration must be > 0")
     if args.interval_ms < 100:
         parser.error("--interval-ms must be >= 100")
+    if not args.expected_profile or SENSITIVE_RE.search(args.expected_profile):
+        parser.error("--expected-profile must be non-empty and non-sensitive")
     for pattern in args.watch_pattern:
         if not pattern or SENSITIVE_RE.search(pattern):
             parser.error(
                 "--watch-pattern must be a non-empty, non-sensitive tag"
             )
 
-    independence = recorder_independence()
+    independence = recorder_independence(args.expected_profile)
     if not independence["independent_of_gwc_and_tunnel"]:
         parser.error(
             "recorder is owned by the GWC/tunnel process tree; "
             "launch it from an independent Herdr pane"
         )
 
-    initial_roles = process_roles()
+    initial_roles = process_roles(args.expected_profile)
     target_precondition = validate_target_preconditions(initial_roles)
     if not target_precondition["valid"]:
         parser.error(
@@ -1236,7 +1252,7 @@ def main() -> int:
 
     try:
         while time.monotonic() < deadline:
-            roles = process_roles()
+            roles = process_roles(args.expected_profile)
             for role, items in roles.items():
                 identity_sig = identity_signature(items)
                 parent_sig = parent_signature(items)
@@ -1463,7 +1479,7 @@ def main() -> int:
             ip_rule_changed=ip_rule_changed,
         )
 
-        final_roles = process_roles()
+        final_roles = process_roles(args.expected_profile)
         end = {
             "ended_epoch_ms": now_epoch_ms(),
             "ended_human": now_human(),
