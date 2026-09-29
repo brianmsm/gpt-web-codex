@@ -33,6 +33,13 @@ type TerminalExecTracePhase =
   | "execution_finished"
   | "response_returned";
 
+export type McpLifecycleEvent =
+  | "request_received"
+  | "execution_started"
+  | "execution_finished"
+  | "response_created"
+  | "response_delivered";
+
 const TRACE_TAG_PATTERN = /(?:^|[\s#;])GWC_TRACE_TAG=([A-Za-z0-9._:-]{1,128})(?=$|[\s;&|#])/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -93,6 +100,35 @@ export class McpRequestTracer {
 
   get enabled(): boolean {
     return this.filePath !== null;
+  }
+
+  recordLifecycle(event: {
+    event_type: McpLifecycleEvent;
+    request_id: RequestId;
+    tool?: string | null;
+    boundary_dispatch_id?: string | null;
+    mcp_session_id?: string | null;
+    jsonrpc_id?: string | number | null;
+    identity?: Record<string, unknown>;
+  }): void {
+    if (!this.filePath) return;
+    try {
+      const payload = {
+        schema: MCP_TRACE_SCHEMA,
+        wall_clock: new Date().toISOString(),
+        monotonic_ns: process.hrtime.bigint().toString(),
+        event_type: event.event_type,
+        sdk_request_id: event.request_id,
+        tool: event.tool ?? null,
+        boundary_dispatch_id: event.boundary_dispatch_id ?? null,
+        mcp_session_id: event.mcp_session_id ?? null,
+        jsonrpc_id: event.jsonrpc_id ?? null,
+        ...event.identity,
+      };
+      appendFileSync(this.filePath, `${JSON.stringify(payload)}\n`, { encoding: "utf8" });
+    } catch {
+      // Diagnostics are deliberately fail-open: tracing must never change tool behavior.
+    }
   }
 
   recordTerminalExec(
