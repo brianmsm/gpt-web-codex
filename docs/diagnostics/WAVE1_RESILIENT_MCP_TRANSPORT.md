@@ -6,92 +6,179 @@ behavior.
 
 ## Result
 
-The duplicate local execution seen in Wave 0 is reproduced and attributed above
-the local GWC dispatch boundary.
+Wave 1 now has a strong one-to-one correlator across the tunnel-client -> MCP
+boundary. For controlled tagged terminal_exec calls, an opt-in diagnostic
+tunnel-client build injects a UUID into MCP request metadata under:
 
-The accepted Proton fault run produced three exact executions of the same tagged
-terminal_exec command. The correlated wire sequence for the same caller-side
-cmd_request_id was:
+    io.openai.gwc/wave1-dispatch-id
 
-| Local execution | tunnel request_id | cmd_request_id | JSON-RPC id | Classification |
-|---|---|---|---:|---|
-| #1 | cmd_5495a840_0d57_43e1_9dbe_791ced7781bf | 82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht | 0 | original |
-| #2 | cmd_8bcf9c01_550c_47d2_b3c2_3a2a064f4b09 | 82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht | 0 | B: new tunnel request, same RPC id |
-| #3 | cmd_50ef2372_5662_4d4d_b70b_40ff8f543436 | 82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht | 1 | C: new tunnel request, new RPC id |
+GWC records that UUID as boundary_dispatch_id at received,
+execution_started, execution_finished, and response_returned.
 
-This rules out both local-only explanations targeted by Wave 1:
+The accepted physical Proton run on 2026-09-29 reproduced two executions of the
+same controlled tagged command. The two executions were reached through two
+different tunnel commands and two different boundary dispatch IDs:
 
-- not A: the duplicate executions do not reuse one tunnel request_id;
-- not D: one tunnel request is not being dispatched locally more than once.
+| Execution | tunnel request_id | cmd_request_id | JSON-RPC id | boundary_dispatch_id | local PID | Classification |
+|---|---|---|---:|---|---:|---|
+| #1 | cmd_5e10430d_a380_45b4_902b_093fb2dc041b | 3c53f827-65e8-4c4c-959d-f6ad0c9b8266/djiq | 0 | 9db797f1-3da2-4977-99ca-5d2da8d47a9b | 430355 | original |
+| #2 | cmd_12ba0814_d1c3_4356_9e15_07af93618e26 | 3c53f827-65e8-4c4c-959d-f6ad0c9b8266/f9gm | 0 | 16cd4241-de04-4564-bf17-baf15249eadf | 454159 | B: new tunnel request, same RPC id |
 
-The stable cmd_request_id ties the sequence to one caller-side correlation,
-while fresh tunnel request IDs prove redelivery/retry above the local GWC tool
-dispatch. The evidence does not distinguish which remote/product component owns
-retry scheduling, so it is intentionally not attributed more narrowly to
-ChatGPT, the control plane, or another caller-side layer.
+This rules out the local-only explanations targeted by Wave 1:
+
+- not A: the repeated execution does not reuse one tunnel request_id;
+- not D: one tunnel command is not dispatched twice inside GWC;
+- classification B is directly demonstrated: a fresh tunnel request with the
+  same JSON-RPC id reaches GWC and starts a fresh local execution.
+
+The decisive causal ordering is that request #2 was already created at
+18:30:09.577, while the Proton kill switch did not begin until 18:31:42.063.
+Therefore the observed retry/redelivery existed before the physical outage and
+cannot have been originated by that outage.
+
+The strongest supported attribution is therefore only:
+
+    an upstream retry/redelivery boundary
+      -> a fresh tunnel request
+      -> a fresh boundary_dispatch_id
+      -> a fresh GWC receive
+      -> a fresh local execution
+
+Local evidence does not identify whether ChatGPT, the control plane, or another
+upstream/product layer created the second command.
+
+## Classification vocabulary
+
+Wave 1 uses the following request-level classifications:
+
+- A: the same tunnel command request_id is redelivered;
+- B: a new tunnel command request_id carries the same JSON-RPC id;
+- C: a new tunnel command request_id carries a new JSON-RPC id;
+- D: one tunnel command is dispatched locally more than once;
+- E: a caller/product retry demonstrated outside the tunnel/control-plane
+  boundary;
+- F: another demonstrated cause.
+
+The accepted strong-correlation run demonstrates B. It does not demonstrate E,
+because local evidence does not identify the component that scheduled the fresh
+tunnel command.
 
 ## Exact tunnel-client version and source
 
-The active bundled client used for the diagnostic was:
+The diagnostic client is based on the exact active v0.0.10 source corresponding
+to:
 
     0.0.10+105e17a79a36e4e5c897fd698ed2b8dbf935b144
 
-The v0.0.10 source archive corresponding to commit
-105e17a79a36e4e5c897fd698ed2b8dbf935b144 was inspected locally under the
-ignored Wave 1 evidence tree.
+The source archive and extracted source tree are kept under the Git-ignored
+Wave 1 evidence tree. The versioned diagnostic delta is:
 
-Relevant v0.0.10 behavior:
+    scripts/diagnostics/tunnel-client-wave1-boundary.patch
 
-- a polled command has a tunnel request_id, JSON-RPC body, channel, created_at,
-  headers, and shard token;
-- JSON-RPC correlation is logged as rpc_request_id;
-- caller/control-plane correlation is logged as cmd_request_id;
-- response POST HTTP correlation is logged separately as tunnel_request_id;
+Relevant v0.0.10 behavior confirmed from source:
+
+- a polled command carries request_id, shard_token, command_type, channel,
+  created_at, headers, and a JSON-RPC body;
+- request_id is the tunnel command identity;
+- cmd_request_id is caller/control-plane correlation, not documented as an
+  idempotency key;
+- rpc_request_id is the JSON-RPC id;
+- tunnel_request_id is the HTTP response-POST identity;
 - poll failures retry with backoff;
-- PostResponse itself performs one HTTP request per invocation; it has no
-  response replay loop in v0.0.10;
-- HTTP 200 is successful response delivery;
-- HTTP 404 is treated as an already-fulfilled/unknown request and returns
-  success to the dispatcher;
-- the "dispatcher forwarded command to MCP server" INFO log occurs only after
-  forwardResponses returns, including any response POST wait. Therefore that
-  timestamp is an end-of-processing marker, not dispatch-start time.
+- PostResponse performs one HTTP request per invocation and has no local
+  response replay loop;
+- HTTP 200 is confirmed successful response delivery;
+- HTTP 404 is logged as "response already fulfilled or unknown request" and is
+  treated as terminal/non-error by the dispatcher;
+- HTTP 404 does not distinguish already accepted from unknown/expired and
+  therefore cannot authorize blind replay of a mutating operation;
+- "dispatcher forwarded command to MCP server" is emitted only after
+  forwardResponses returns, so it is an end-of-processing marker, not a
+  dispatch-start marker.
 
-There is no request-specific response_timeout field in the v0.0.10 command wire
-shape. Individual created_at values are not emitted in the safe
-request-correlated logs used here, so neither value is invented in this report.
+### Local HTTP deadline
 
-## GWC request tracer
+v0.0.10 constructs one http.Client with:
 
-Wave 1 adds opt-in diagnostic tracing for terminal_exec through the environment
-variable CODEX_CHATGPT_WEB_MCP_TRACE_FILE.
+    Timeout = PollDeadlineTimeoutOrDefault()
 
-Tracing is disabled by default. The schema is gwc-mcp-trace/v1 and records:
+The defaults are:
+
+    poll timeout = 30 s
+    poll deadline guardrail = 5 s
+    resulting local HTTP client deadline = 35 s
+
+The same http.Client is used for PostResponse. Therefore the approximately
+35-second wait observed in the older 2026-09-22 fault run is the local
+tunnel-client HTTP deadline. It is not evidence of an MCP operation deadline,
+caller deadline, control-plane retry interval, or request-specific
+response_timeout.
+
+There is no request-specific response_timeout field in the v0.0.10 command
+wire shape.
+
+## Strong boundary correlator
+
+The diagnostic v0.0.10 patch is disabled unless:
+
+    TUNNEL_CLIENT_WAVE1_TRACE=1
+
+For a controlled tagged terminal_exec request it:
+
+1. generates one UUID immediately before forwarding the JSON-RPC request to
+   stdio;
+2. merges that UUID into request params._meta under
+   io.openai.gwc/wave1-dispatch-id;
+3. logs only the UUID and controlled trace tag, while existing structured log
+   context supplies request_id, cmd_request_id, and rpc_request_id;
+4. leaves untagged requests unchanged;
+5. fails open to the original request if diagnostic injection fails.
+
+The patch does not log the raw command.
+
+GWC tracing is enabled only when CODEX_CHATGPT_WEB_MCP_TRACE_FILE is set. GWC
+reads RequestHandlerExtra._meta, validates the UUID, and writes
+boundary_dispatch_id into its existing gwc-mcp-trace/v1 events.
+
+This produces the direct join:
+
+    tunnel request_id
+      -> cmd_request_id / rpc_request_id
+      -> boundary_dispatch_id
+      -> GWC received
+      -> local execution id
+      -> local PID/starttime
+      -> GWC response_returned
+
+The focused tests also verify that two SDK calls with distinct metadata UUIDs
+retain the correct UUID through every trace phase.
+
+## Privacy properties
+
+The GWC tracer records:
 
 - wall clock and monotonic clock;
 - GWC PID and /proc starttime;
-- the actual MCP SDK RequestHandlerExtra.requestId;
+- MCP SDK RequestHandlerExtra.requestId;
 - tool name;
-- an explicit non-secret trace tag when present;
-- a deterministic digest of sanitized controlled fields;
-- the real DirectToolService execution/job id;
+- controlled non-secret trace tag when present;
+- deterministic digest of controlled sanitized fields;
+- boundary_dispatch_id when present;
+- DirectToolService execution/job id;
 - local PID and process starttime when available;
 - terminal status and exit code;
-- phases received, execution_started, execution_finished, and response_returned.
+- phases received, execution_started, execution_finished, and
+  response_returned.
 
-The raw command is never written by the tracer. The digest does not hash the raw
-command or arbitrary user input. It is built only from controlled sanitized
-fields such as tool, cwd/workspace, wait timeout, permission mode, and the
-explicit safe trace tag. Trace-file failures are fail-open and do not change the
-tool result.
+The raw command is never written by the tracer. The digest is not computed from
+the raw command or arbitrary user input. Trace-file failures are fail-open.
 
-No public MCP tool, catalog entry, schema, or tools/list surface was added or
-changed by the tracer.
+No public MCP tool, catalog entry, schema, or tools/list surface is added by
+this instrumentation.
 
 ## Observability boundary in v0.0.10
 
-The following local endpoints requested during planning do not exist in
-v0.0.10:
+The following proposed endpoints do not exist in v0.0.10:
 
     /health/control-plane
     /health/response-delivery
@@ -99,7 +186,7 @@ v0.0.10:
     /health/dispatcher
     /health/mcp
 
-Wave 1 used the available safe surfaces instead:
+Wave 1 uses the available safe surfaces instead:
 
     /healthz
     /readyz
@@ -107,17 +194,17 @@ Wave 1 used the available safe surfaces instead:
     /api/log-level
     /metrics
 
-plus structured tunnel-client logs and the GWC NDJSON tracer.
+plus structured tunnel-client logs, the independent recorder, and the GWC
+NDJSON tracer.
 
 The status endpoint exposes client instance identity, uptime,
-channel/transport state, and the stdio child PID, but not a child_generation or
-initialize_epoch. Those fields are therefore recorded as unavailable rather
-than inferred.
+channel/transport state, and the stdio child PID, but not child_generation or
+initialize_epoch. Mcp-Session-Id was not present in the correlated safe events.
+Those values are not inferred or invented.
 
-Mcp-Session-Id was not present in the correlated safe events. No session id is
-invented.
+## Baselines
 
-## Normal baseline
+### Original 2026-09-22 normal baseline
 
 Tag: W1_BASE_20260922_A.
 
@@ -129,7 +216,7 @@ The baseline produced exactly one chain:
       -> one local execution
       -> one execution result
       -> one response POST
-      -> HTTP 200 delivery
+      -> HTTP 200
 
 Correlated identities:
 
@@ -141,42 +228,41 @@ Correlated identities:
     response HTTP id:    req_6ba0696e751f491aba9bf38834e4c4ae
     response status:     200
 
-The GWC trace spans 12:22:43.419 to 12:22:45.500 Europe/Madrid. The response
-was accepted by the control plane at 12:22:45.667.
+This baseline showed that the original GWC tracer itself did not create an
+extra local dispatch.
 
-This baseline demonstrates that the tracing layer does not itself create an
-extra local dispatch or response attempt.
+### Strong-correlator baseline on 2026-09-29
 
-## Accepted Proton fault run
+Tag: W1_REVIEW_BASE.
 
-Raw evidence directory, intentionally ignored by Git:
+The same boundary UUID was present on both sides:
 
-    diagnostics/wave1-runs/session-20260922/
-      fault2c-20260922T161452+0200/
+    tunnel request_id:     cmd_899feaa5_3184_451d_a42b_a394de0e60cd
+    cmd_request_id:        e81df2a8-d157-4c5e-b73c-4f96d1991063/514j
+    rpc_request_id:        0
+    boundary_dispatch_id:  835b472c-033c-4953-a0ff-4111b6a6f825
+    GWC execution id:      f35fa727-2a57-467d-9e60-c80fc1feae15
+    local PID:             1372754
+
+GWC recorded received -> execution_started -> execution_finished ->
+response_returned with the same boundary_dispatch_id.
+
+A later post-recovery baseline repeated the same result with
+boundary_dispatch_id ef8d3bc9-499d-4013-82a1-50f306f349a8.
+
+## Historical 2026-09-22 Proton run and its limitation
 
 Tag: W1_FAULT2C_161452.
 
-The existing Wave 0 physical-transition evaluator was re-used against the fault
-samples and returned:
+The physical transition itself was valid:
 
-    transition_valid: true
-    classification_allowed: true
-    kill_switch_window_ms: 7409
+    kill-switch window: 7409 ms
     initial proton0: absent
-    initial pvpnksintrf0: absent
-    proton0 observed during kill switch: true
+    kill switch observed: yes
     final proton0: present
-    final pvpnksintrf0: absent
-    final public reachability: true
-    IPv4 default route changed: true
-    ip rule changed: true
+    public reachability restored: yes
 
-The kill-switch interval was observed from 16:22:44.035 through
-16:22:51.444 Europe/Madrid.
-
-### First execution
-
-GWC directly traced the first execution:
+The first execution was fully traced by GWC:
 
     received:            16:22:43.563
     execution_started:   16:22:43.592
@@ -187,168 +273,270 @@ GWC directly traced the first execution:
     local PID/starttime: 159328 / 31471676
     SDK request id:      0
 
-The independent recorder sees the same tagged shell from 16:22:44.035 through
-16:23:03.518, so the local command survived the complete physical Proton
-kill-switch interval.
-
-Tunnel-client then received the MCP response at 16:23:03.736 for:
-
-    request_id:      cmd_5495a840_0d57_43e1_9dbe_791ced7781bf
-    cmd_request_id:  82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht
-    rpc_request_id:  0
-
-The response POST did not complete. At 16:23:38.737 it ended with:
+Tunnel-client attempted one response POST. At 16:23:38.737 the local HTTP
+client ended with:
 
     Client.Timeout exceeded while awaiting headers
 
-Thus the observed response-delivery wait after the local response was about
-35.0 seconds. This is an observed duration, not a claimed command
-response_timeout field.
+The correct interpretation is:
 
-Immediately afterward the stdio MCP command exited and tunnel-client logged
-"stdio MCP command failed; requesting tunnel-client shutdown" at
-16:23:38.754.
+- the local execution completed;
+- tunnel-client made one PostResponse HTTP attempt;
+- the client did not observe response headers before its approximately
+  35-second local HTTP deadline;
+- remote/control-plane acceptance of that result is unknown.
 
-### Runtime replacement and local health
+This must not be described as proven failed delivery.
 
-The recorder observed the following identity transition:
+Immediately after that timeout the stdio MCP command exited and the managed
+runtime was later replaced. Herdr survived.
 
-    tunnel-client 111154/31408202 -> absent -> 166168/31479572
-    GWC           111178/31408210 -> absent -> 166185/31479579
-    Herdr         34847/86787     -> unchanged
+The recorder then observed two additional exact tagged shells. However the
+replacement GWC was the installed, uninstrumented runtime, so those later
+executions lacked a direct tunnel request_id -> GWC receive -> local PID
+correlator. The older report inferred mappings using trace tag, cmd_request_id,
+RPC ordering, and time. Those inferred mappings are retained only as historical
+context and are not used for the final A/B/C/D classification.
 
-The component sampler saw /healthz and /readyz become unavailable at
-16:23:39.103 and return HTTP 200 at 16:24:02.636. The new tunnel-client
-reported a different client_instance_id.
+## Independent no-Proton retry control on 2026-09-29
 
-This restart occurs after the failed response delivery and the stdio child exit;
-Wave 1 records that ordering but does not claim Proton alone directly killed the
-local processes.
+Tag: W1_REVIEW_NOTIFY_181737.
 
-### Second execution: classification B
+This run did not contain a physical Proton transition: the recorder observed no
+proton0 and no pvpnksintrf0. It nevertheless reproduced two executions with
+strong boundary identity.
 
-After the new GWC started, the independent recorder saw the exact same tagged
-shell again:
+Request #1:
 
-    PID/starttime: 166289 / 31479628
-    parent GWC:    166185
-    first seen:    16:24:03.166
-    last seen:     16:24:23.106
+    request_id:            cmd_6320ff88_729f_4002_a38d_c207067b11e1
+    cmd_request_id:        3c53f827-65e8-4c4c-959d-f6ad0c9b8266/krbk
+    rpc_request_id:        0
+    boundary_dispatch_id:  a9bab347-4b24-49e0-8400-55e7dab72374
+    local PID:             353145
 
-The same caller correlation later completes under a fresh tunnel request:
+Request #2:
 
-    request_id:      cmd_8bcf9c01_550c_47d2_b3c2_3a2a064f4b09
-    cmd_request_id:  82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht
-    rpc_request_id:  0
+    request_id:            cmd_5c0bec59_b578_44d5_afc4_1340a4176bdf
+    cmd_request_id:        3c53f827-65e8-4c4c-959d-f6ad0c9b8266/5gki
+    rpc_request_id:        0
+    boundary_dispatch_id:  002934c1-bf48-4b11-8de2-e2dc28e91fc3
+    local PID:             378376
 
-Because the tunnel request identity changed while the JSON-RPC id stayed 0,
-this is classification B: new tunnel request, same RPC id.
+Each response POST received HTTP 404, represented by v0.0.10 as:
 
-### Third execution: classification C
+    response already fulfilled or unknown request
 
-A third exact tagged shell then ran under the same replacement GWC:
+This control independently demonstrates classification B without any Proton
+transition. It is strong evidence that the retry/redelivery mechanism can occur
+without the VPN fault.
 
-    PID/starttime: 171918 / 31483772
-    parent GWC:    166185
-    first seen:    16:24:44.804
-    last seen:     16:25:04.500
+## Accepted physical Proton run on 2026-09-29
 
-Its correlated caller sequence advances to:
+Tag: W1_PHYS_FINAL_182843.
 
-    request_id:      cmd_50ef2372_5662_4d4d_b70b_40ff8f543436
-    cmd_request_id:  82562ce5-bca1-4eb5-9831-b86a80ffc1c4/y8ht
-    rpc_request_id:  1
+Raw evidence directory, intentionally ignored by Git:
 
-This is classification C: new tunnel request and new RPC id.
+    diagnostics/wave1-runs/session-20260929/
+      review-physical-final-20260929T182843+0200/
 
-The remote invocation as observed by the caller timed out; the local evidence
-therefore must not be reinterpreted as a successful original invocation.
+The recorder captured:
+
+    initial proton0: absent
+    initial pvpnksintrf0: absent
+    kill-switch first: 18:31:42.063
+    kill-switch last:  18:31:48.782
+    proton0 first:     18:31:42.263
+    public reachability failures observed: yes
+    final proton0: present
+
+Throughout the accepted sample window, process identity did not change:
+
+    tunnel-client: 307525 / 324601
+    GWC:           307546 / 324606
+    Herdr:          74505 / 153936
+
+Therefore this accepted run does not depend on runtime replacement or
+post-restart inference.
+
+### Request #1
+
+Tunnel boundary:
+
+    time:                  18:29:08.589
+    request_id:            cmd_5e10430d_a380_45b4_902b_093fb2dc041b
+    cmd_request_id:        3c53f827-65e8-4c4c-959d-f6ad0c9b8266/djiq
+    rpc_request_id:        0
+    boundary_dispatch_id:  9db797f1-3da2-4977-99ca-5d2da8d47a9b
+
+GWC boundary and execution:
+
+    received:              18:29:08.591
+    execution_started:     18:29:08.592
+    execution_finished:    18:32:00.949
+    response_returned:     18:32:00.949
+    local execution id:    c06499b7-ca32-4181-be19-f634ffebef1b
+    local PID/starttime:   430355 / 466605
+
+The same boundary_dispatch_id is present at the tunnel boundary and every GWC
+trace phase.
+
+The shell intentionally remained active through the Proton transition and
+returned after the kill switch had ended, matching the temporal shape of the
+older fault run.
+
+Tunnel-client's response POST then received HTTP 404 at 18:32:01.121:
+
+    response already fulfilled or unknown request
+
+That is terminal from the v0.0.10 dispatcher's perspective but does not reveal
+whether the result had already been accepted or the request was unknown/expired.
+
+### Request #2
+
+A second tunnel command for the same controlled tagged input was already
+created at:
+
+    time:                  18:30:09.577
+    request_id:            cmd_12ba0814_d1c3_4356_9e15_07af93618e26
+    cmd_request_id:        3c53f827-65e8-4c4c-959d-f6ad0c9b8266/f9gm
+    rpc_request_id:        0
+    boundary_dispatch_id:  16cd4241-de04-4564-bf17-baf15249eadf
+
+Critically, this timestamp is about 92.5 seconds before the first observed
+kill-switch sample at 18:31:42.063.
+
+After request #1 returned, GWC received request #2 at 18:32:01.034 and started
+a fresh local execution:
+
+    local execution id: 5420dbc0-2ec0-4172-bbc2-691c9f574c50
+    local PID/starttime: 454159 / 483850
+
+The second GWC response_returned event occurred at 18:35:01.036 with
+terminal_status=running because the terminal_exec wait window elapsed while its
+local process remained active. Tunnel-client then received HTTP 404 for its
+response POST at 18:35:01.216.
+
+### Physical-run classification
+
+This is classification B:
+
+    new tunnel request_id
+      + same rpc_request_id
+      + new boundary_dispatch_id
+      + new GWC received
+      + new local execution
+
+It is not A and not D.
+
+Most importantly, request #2 existed before the Proton outage began. The
+physical outage therefore did not originate the observed retry/redelivery.
 
 ## Causal conclusion
 
-Wave 1 demonstrates that the duplicate execution is not created by one GWC
-handler dispatching a single tunnel command twice. Distinct tunnel request IDs
-exist for the repeated executions, and one retry preserves the RPC id while a
-later retry advances it.
+Wave 1 now directly demonstrates that the duplicate local execution is produced
+above the local GWC dispatch boundary.
 
-The strongest supported attribution is therefore:
+The accepted physical run establishes:
 
-    caller/control-plane retry or redelivery boundary
-      -> fresh tunnel request
-      -> GWC receives another request
-      -> another real local execution
+1. one tunnel request maps one-to-one through a unique boundary_dispatch_id to
+   one GWC receive and one local execution;
+2. the repeated execution arrives through a different tunnel request_id and a
+   different boundary_dispatch_id;
+3. the repeated request preserves JSON-RPC id 0, so the demonstrated
+   classification is B;
+4. tunnel-client, GWC, and Herdr all retain the same process identities across
+   the physical Proton transition;
+5. the second tunnel command was created before that Proton transition began.
 
-The local runtime has no evidence, in this run, that would allow it to know that
-these fresh requests represent the same logical operation unless it is given or
-derives an idempotency identity above the individual tunnel request_id /
-JSON-RPC id pair.
+The no-Proton control independently reproduces the same B pattern.
+
+Therefore the strongest supported causal statement is:
+
+    the duplicate execution is caused by an upstream retry/redelivery that
+    creates a fresh tunnel command; it is not caused by GWC locally
+    double-dispatching one request, and the observed Proton outage is not the
+    origin of the demonstrated retry.
+
+Wave 1 does not identify the exact upstream component that schedules the retry.
+It must not be narrowed to ChatGPT, the control plane, or another caller/product
+component without new evidence.
+
+## Response-delivery semantics
+
+Response delivery must remain separate from local execution.
+
+Confirmed cases:
+
+- normal baseline: HTTP 200, accepted response delivery;
+- historical 2026-09-22 fault request: one PostResponse attempt; local
+  http.Client timeout after about 35 seconds while awaiting headers; remote
+  acceptance unknown;
+- no-Proton B control: both response POSTs returned HTTP 404;
+- accepted physical B run: both response POSTs returned HTTP 404.
+
+For v0.0.10, HTTP 404 means only:
+
+    already fulfilled or unknown request
+
+It is not evidence that this specific response was accepted, and it is not
+evidence that it was rejected before execution. It cannot safely authorize a
+blind replay of a mutating tool.
 
 ## Wave 2 implication, without implementing Wave 2
 
-Wave 2 should be scoped around request identity and idempotency across transient
-response-delivery failure and runtime/session reacquisition. It should not begin
-from a premise that GWC internally double-dispatches one request.
+Wave 2 should be identity/idempotency-first, not transport-restart-first.
 
-Questions Wave 2 must answer before implementation include:
+The evidence says that a local at-most-once mechanism keyed only by
+tunnel request_id or JSON-RPC id is insufficient to recognize all logical
+retries: a fresh tunnel request can preserve the same RPC id, and future
+evidence could still show retries that also change RPC id.
 
-- what identity is authoritative for recognizing a replay of one logical tool
-  operation across fresh tunnel request IDs and possibly fresh RPC IDs;
-- where the idempotency/dedup state may safely live across GWC/tunnel restarts;
-- how mutating tools differ from read-only tools when the caller cannot know
-  whether the first execution completed;
-- what response can be replayed safely after an already-completed execution;
-- how long any dedup/idempotency record may remain authoritative;
-- how session reacquisition interacts with the above identity.
+Before implementation, Wave 2 must decide:
+
+- which identity domain is authoritative for one logical tool operation;
+- whether that identity is supplied by an upstream layer or must be derived
+  locally from a stronger contract;
+- where dedup/idempotency state may safely live across runtime/session changes;
+- how mutating tools differ from read-only tools when first-attempt acceptance
+  is unknown;
+- what result, if any, may be replayed safely after an already-completed
+  execution;
+- how long an idempotency record remains authoritative;
+- how HTTP 404 ambiguity affects response replay and recovery.
 
 No deduplication, replay cache, response retry, session reacquisition, or
-transport change is implemented in Wave 1.
+transport behavior is implemented by Wave 1.
 
 ## Raw evidence and privacy
 
 Raw runs are kept below diagnostics/wave1-runs/ and are Git-ignored. They may
-contain local PIDs, routes, runtime paths, and tunnel correlation IDs, so only
-this sanitized interpretation is versioned.
+contain local PIDs, routes, runtime paths, and tunnel correlation IDs.
 
-No API key value, authorization header, environment dump, or raw arbitrary tool
-command is added to the versioned evidence.
+The versioned artifacts contain no API key value, authorization header,
+environment dump, or arbitrary raw user command.
 
-## Response-delivery outcomes and remaining uncertainty
-
-Response delivery is intentionally kept separate from local execution:
-
-- baseline: one response POST was confirmed HTTP 200;
-- fault execution #1: the local result existed, but its response POST ended in
-  Client.Timeout after about 35 seconds;
-- fault executions #2 and #3: after the managed runtime was relaunched, the
-  supervisor restored the original INFO-level profile. The available INFO logs
-  preserve request/cmd/RPC correlation and end-of-processing markers, but do
-  not contain the DEBUG HTTP-200 delivery event. Their response acceptance is
-  therefore not claimed;
-- the caller-visible outcome for the original remote invocation remained
-  timeout.
-
-The mapping of executions #2 and #3 uses the exact repeated trace tag observed
-by the independent recorder, the stable caller-side cmd_request_id, the ordered
-RPC ids, and the v0.0.10 source ordering showing that the INFO "forwarded"
-message is emitted after response forwarding returns. No raw command body is
-taken from tunnel logs.
+## Remaining uncertainty
 
 Still unresolved by local evidence:
 
-- which remote/product component schedules the retry/redelivery;
-- whether execution #2's response reached the control plane before its context
-  ended;
-- whether execution #3's response reached the control plane;
+- which upstream/product component schedules the retry/redelivery;
+- the authoritative logical-operation identity, if one exists above the tunnel
+  request and JSON-RPC ids;
 - request-specific created_at and Mcp-Session-Id for the correlated commands;
-- child_generation and initialize_epoch, which v0.0.10 does not expose.
+- child_generation and initialize_epoch, which v0.0.10 does not expose;
+- whether a 404 response corresponds to an already accepted result or an
+  unknown/expired request in any individual case.
+
+These limits are material. Wave 1 intentionally does not infer beyond them.
 
 ## Verification
 
-Final verification after the documentation update:
+Final verification after the diagnostic and documentation changes:
 
-- Bun focused tests: 22 passed, 0 failed, 302 expectations;
-- Python diagnostics tests: 21 passed;
+- focused Bun tracer tests: 3 passed, 0 failed, 41 expectations;
 - TypeScript typecheck: passed;
-- git diff --check: passed;
 - runtime bundle build: passed;
-- relocatable standalone MCP smoke: RELOCATABLE_STANDALONE_MCP_SMOKE_OK.
+- tunnel-client diagnostic patch dry-run against pristine v0.0.10 source:
+  passed;
+- tunnel-client diagnostic Go tests for pkg/dispatcher/internal: passed;
+- git diff --check: passed.
