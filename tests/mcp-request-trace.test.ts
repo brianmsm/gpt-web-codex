@@ -5,9 +5,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MCP_TRACE_DISPATCH_META_KEY,
   MCP_TRACE_FILE_ENV,
   MCP_TRACE_SCHEMA,
   McpRequestTracer,
+  mcpTraceDispatchId,
   terminalExecTraceIdentity,
 } from "../src/adapters/chatgpt-web/mcp-request-trace";
 
@@ -61,6 +63,11 @@ test("MCP request tracing is disabled by default and sanitizes tagged input iden
 
   const untagged = terminalExecTraceIdentity({ ...base, command: "printf 'RAW_SECRET_FIXTURE'" });
   expect(untagged).toEqual({ trace_tag: null, input_digest: null });
+
+  const dispatchId = "11111111-2222-4333-8444-555555555555";
+  expect(mcpTraceDispatchId({ [MCP_TRACE_DISPATCH_META_KEY]: dispatchId })).toBe(dispatchId);
+  expect(mcpTraceDispatchId({ [MCP_TRACE_DISPATCH_META_KEY]: "not-a-uuid" })).toBeNull();
+  expect(mcpTraceDispatchId(null)).toBeNull();
 });
 
 test("enabled MCP request tracing preserves SDK request ids and distinct local executions without changing tools/list", async () => {
@@ -74,6 +81,10 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
 
     const tag = "wave1-test-stable";
     const command = taggedCommand(tag, "RAW_SECRET_FIXTURE");
+    const boundaryDispatchIds = [
+      "11111111-2222-4333-8444-555555555555",
+      "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    ];
     for (let index = 0; index < 2; index += 1) {
       const response = await tracedClient.callTool({
         name: "terminal_exec",
@@ -84,6 +95,7 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
           permission_mode: "workspace-write",
           wait_timeout_ms: 5_000,
         },
+        _meta: { [MCP_TRACE_DISPATCH_META_KEY]: boundaryDispatchIds[index] },
       });
       expect(response.isError).not.toBe(true);
       expect(response.structuredContent).toMatchObject({ status: "completed", exit_code: 0 });
@@ -102,6 +114,7 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
     expect(received).toHaveLength(2);
     expect(received[0]?.sdk_request_id).not.toEqual(received[1]?.sdk_request_id);
     expect(received[0]?.input_digest).toEqual(received[1]?.input_digest);
+    expect(received.map(event => event.boundary_dispatch_id)).toEqual(boundaryDispatchIds);
 
     const requestIds = received.map(event => event.sdk_request_id);
     const executionIds: unknown[] = [];
@@ -113,6 +126,9 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
         "execution_finished",
         "response_returned",
       ]);
+      expect(new Set(requestEvents.map(event => event.boundary_dispatch_id))).toEqual(
+        new Set([boundaryDispatchIds[requestIds.indexOf(requestId)]]),
+      );
       const started = requestEvents.find(event => event.phase === "execution_started");
       expect(started?.local_execution_id).toBeTruthy();
       expect(started?.local_pid).toBeTruthy();

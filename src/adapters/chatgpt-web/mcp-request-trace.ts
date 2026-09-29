@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 
 export const MCP_TRACE_FILE_ENV = "CODEX_CHATGPT_WEB_MCP_TRACE_FILE";
 export const MCP_TRACE_SCHEMA = "gwc-mcp-trace/v1";
+export const MCP_TRACE_DISPATCH_META_KEY = "io.openai.gwc/wave1-dispatch-id";
 
 export interface TerminalExecTraceInput {
   command: string;
@@ -33,6 +34,13 @@ type TerminalExecTracePhase =
   | "response_returned";
 
 const TRACE_TAG_PATTERN = /(?:^|[\s#;])GWC_TRACE_TAG=([A-Za-z0-9._:-]{1,128})(?=$|[\s;&|#])/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function mcpTraceDispatchId(meta: unknown): string | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const value = (meta as Record<string, unknown>)[MCP_TRACE_DISPATCH_META_KEY];
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value : null;
+}
 
 function processStarttimeTicks(pid: number | undefined): string | null {
   if (process.platform !== "linux" || !pid || pid <= 0) return null;
@@ -92,6 +100,7 @@ export class McpRequestTracer {
     requestId: RequestId,
     identity: TerminalExecTraceIdentity,
     job?: TerminalExecTraceJob,
+    boundaryDispatchId: string | null = null,
   ): void {
     if (!this.filePath) return;
     try {
@@ -106,6 +115,7 @@ export class McpRequestTracer {
         tool: "terminal_exec",
         trace_tag: identity.trace_tag,
         input_digest: identity.input_digest,
+        boundary_dispatch_id: boundaryDispatchId,
         local_execution_id: job?.id ?? null,
         local_pid: job?.pid ?? null,
         local_process_starttime_ticks: processStarttimeTicks(job?.pid),

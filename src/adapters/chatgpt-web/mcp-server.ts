@@ -15,7 +15,7 @@ import {
 } from "../../standalone/image-preview";
 import { LunaJobManager } from "../../standalone/luna-jobs";
 import { HerdrClient } from "../../standalone/herdr-client";
-import { McpRequestTracer, terminalExecTraceIdentity } from "./mcp-request-trace";
+import { McpRequestTracer, mcpTraceDispatchId, terminalExecTraceIdentity } from "./mcp-request-trace";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
 import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
 import {
@@ -792,15 +792,16 @@ export async function runChatGptMcpServer(options: {
     _meta: { securitySchemes: noAuth },
   }, async (input, extra) => {
     const traceIdentity = terminalExecTraceIdentity(input);
-    requestTrace.recordTerminalExec("received", extra.requestId, traceIdentity);
+    const boundaryDispatchId = mcpTraceDispatchId(extra._meta);
+    requestTrace.recordTerminalExec("received", extra.requestId, traceIdentity, undefined, boundaryDispatchId);
     const started = direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode);
-    requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started);
+    requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started, boundaryDispatchId);
     const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms);
     if (completed.status !== "running") {
-      requestTrace.recordTerminalExec("execution_finished", extra.requestId, traceIdentity, completed);
+      requestTrace.recordTerminalExec("execution_finished", extra.requestId, traceIdentity, completed, boundaryDispatchId);
     }
     const response = result(publicTerminal(completed));
-    requestTrace.recordTerminalExec("response_returned", extra.requestId, traceIdentity, completed);
+    requestTrace.recordTerminalExec("response_returned", extra.requestId, traceIdentity, completed, boundaryDispatchId);
     return response;
   });
 

@@ -1,0 +1,154 @@
+--- a/pkg/dispatcher/internal/processor.go
++++ b/pkg/dispatcher/internal/processor.go
+@@ -427,6 +427,7 @@
+ 		return nil
+ 	}
+ 
++	injectWave1DispatchIdentity(logger, req)
+ 	headers := ensureDefaultAcceptHeader(cmd.Headers())
+ 	statusCode, respHeader, err := conn.Write(ctx, headers, req)
+ 	statusCode = normalizeTransportStatusCode(statusCode, err)
+--- /dev/null
++++ b/pkg/dispatcher/internal/wave1_trace.go
+@@ -0,0 +1,67 @@
++package dispatcherinternal
++
++import (
++	"encoding/json"
++	"log/slog"
++	"os"
++	"regexp"
++
++	"github.com/google/uuid"
++	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
++)
++
++const (
++	wave1TraceEnv        = "TUNNEL_CLIENT_WAVE1_TRACE"
++	wave1DispatchMetaKey = "io.openai.gwc/wave1-dispatch-id"
++)
++
++var wave1TraceTagPattern = regexp.MustCompile("(?:^|[\\s#;])GWC_TRACE_TAG=([A-Za-z0-9._:-]{1,128})(?:$|[\\s;&|#])")
++
++func injectWave1DispatchIdentity(logger *slog.Logger, req *jsonrpc.Request) string {
++	if os.Getenv(wave1TraceEnv) != "1" || req == nil || req.Method != "tools/call" {
++		return ""
++	}
++
++	var params map[string]any
++	if err := json.Unmarshal(req.Params, &params); err != nil {
++		return ""
++	}
++	if name, _ := params["name"].(string); name != "terminal_exec" {
++		return ""
++	}
++	arguments, ok := params["arguments"].(map[string]any)
++	if !ok {
++		return ""
++	}
++	command, ok := arguments["command"].(string)
++	if !ok {
++		return ""
++	}
++	match := wave1TraceTagPattern.FindStringSubmatch(command)
++	if len(match) != 2 {
++		return ""
++	}
++
++	meta, _ := params["_meta"].(map[string]any)
++	if meta == nil {
++		meta = map[string]any{}
++	}
++	dispatchID := uuid.NewString()
++	meta[wave1DispatchMetaKey] = dispatchID
++	params["_meta"] = meta
++
++	encoded, err := json.Marshal(params)
++	if err != nil {
++		return ""
++	}
++	req.Params = encoded
++
++	if logger != nil {
++		logger.Info(
++			"wave1 diagnostic dispatch identity",
++			slog.String("wave1_dispatch_id", dispatchID),
++			slog.String("trace_tag", match[1]),
++		)
++	}
++	return dispatchID
++}
+--- /dev/null
++++ b/pkg/dispatcher/internal/wave1_trace_test.go
+@@ -0,0 +1,71 @@
++package dispatcherinternal
++
++import (
++	"bytes"
++	"encoding/json"
++	"log/slog"
++	"testing"
++
++	"github.com/google/uuid"
++	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
++	"github.com/stretchr/testify/require"
++)
++
++func wave1TaggedRequest(t *testing.T, command string) *jsonrpc.Request {
++	t.Helper()
++	params, err := json.Marshal(map[string]any{
++		"name": "terminal_exec",
++		"arguments": map[string]any{
++			"command": command,
++		},
++		"_meta": map[string]any{
++			"existing": "preserved",
++		},
++	})
++	require.NoError(t, err)
++	return &jsonrpc.Request{Method: "tools/call", Params: params}
++}
++
++func TestInjectWave1DispatchIdentityDisabled(t *testing.T) {
++	t.Setenv(wave1TraceEnv, "")
++	req := wave1TaggedRequest(t, "printf RAW_SECRET_FIXTURE # GWC_TRACE_TAG=W1_TEST")
++	before := append([]byte(nil), req.Params...)
++
++	require.Empty(t, injectWave1DispatchIdentity(slog.Default(), req))
++	require.Equal(t, before, []byte(req.Params))
++}
++
++func TestInjectWave1DispatchIdentityTaggedTerminalExec(t *testing.T) {
++	t.Setenv(wave1TraceEnv, "1")
++	req := wave1TaggedRequest(t, "printf RAW_SECRET_FIXTURE # GWC_TRACE_TAG=W1_TEST")
++	var buf bytes.Buffer
++	logger := slog.New(slog.NewJSONHandler(&buf, nil))
++
++	dispatchID := injectWave1DispatchIdentity(logger, req)
++	require.NotEmpty(t, dispatchID)
++	_, err := uuid.Parse(dispatchID)
++	require.NoError(t, err)
++
++	var params map[string]any
++	require.NoError(t, json.Unmarshal(req.Params, &params))
++	meta, ok := params["_meta"].(map[string]any)
++	require.True(t, ok)
++	require.Equal(t, "preserved", meta["existing"])
++	require.Equal(t, dispatchID, meta[wave1DispatchMetaKey])
++
++	logText := buf.String()
++	require.Contains(t, logText, "wave1 diagnostic dispatch identity")
++	require.Contains(t, logText, dispatchID)
++	require.Contains(t, logText, "W1_TEST")
++	require.NotContains(t, logText, "RAW_SECRET_FIXTURE")
++	require.NotContains(t, logText, "printf")
++}
++
++func TestInjectWave1DispatchIdentityRequiresControlledTag(t *testing.T) {
++	t.Setenv(wave1TraceEnv, "1")
++	req := wave1TaggedRequest(t, "printf RAW_SECRET_FIXTURE")
++	before := append([]byte(nil), req.Params...)
++
++	require.Empty(t, injectWave1DispatchIdentity(slog.Default(), req))
++	require.Equal(t, before, []byte(req.Params))
++}
