@@ -68,6 +68,8 @@ TUNNEL_EVENT_KEYS = {
     "request_id",
     "cmd_request_id",
     "rpc_request_id",
+    "wave1_dispatch_id",
+    "trace_tag",
     "client_instance_id",
     "tunnel_id",
     "status",

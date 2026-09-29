@@ -31,21 +31,26 @@ This rules out the local-only explanations targeted by Wave 1:
 - classification B is directly demonstrated: a fresh tunnel request with the
   same JSON-RPC id reaches GWC and starts a fresh local execution.
 
-The decisive causal ordering is that request #2 was already created at
-18:30:09.577, while the Proton kill switch did not begin until 18:31:42.063.
-Therefore the observed retry/redelivery existed before the physical outage and
-cannot have been originated by that outage.
+The decisive ordering is that request #2 had already reached tunnel-client
+and was entering local dispatch at 18:30:09.577, while the Proton kill switch
+did not begin until 18:31:42.063. Therefore the second equivalent request
+already existed locally before the physical outage; that outage cannot have
+originated its arrival at tunnel-client. The 18:30:09.577 timestamp is not the
+wire created_at value, which remains unknown.
 
-The strongest supported attribution is therefore only:
+The strongest supported statement is therefore only:
 
-    an upstream retry/redelivery boundary
-      -> a fresh tunnel request
-      -> a fresh boundary_dispatch_id
-      -> a fresh GWC receive
-      -> a fresh local execution
+    two distinct upstream/tunnel requests carry the same controlled payload
+      -> each has its own tunnel request_id
+      -> each gets its own boundary_dispatch_id
+      -> each reaches GWC once
+      -> each starts one local execution
 
-Local evidence does not identify whether ChatGPT, the control plane, or another
-upstream/product layer created the second command.
+Local evidence does not establish the relationship between those two upstream
+requests. In particular, it does not prove that request #2 is a retry, replay,
+or redelivery of the same authoritative logical operation. Their complete
+cmd_request_id values are distinct and opaque; the shared textual prefix has no
+documented identity semantics in v0.0.10.
 
 ## Classification vocabulary
 
@@ -59,9 +64,9 @@ Wave 1 uses the following request-level classifications:
   boundary;
 - F: another demonstrated cause.
 
-The accepted strong-correlation run demonstrates B. It does not demonstrate E,
-because local evidence does not identify the component that scheduled the fresh
-tunnel command.
+The accepted strong-correlation run demonstrates B. It does not demonstrate E:
+there is no captured caller/product identity or explicit upstream evidence that
+establishes request #2 as a retry of request #1.
 
 ## Exact tunnel-client version and source
 
@@ -298,7 +303,7 @@ correlator. The older report inferred mappings using trace tag, cmd_request_id,
 RPC ordering, and time. Those inferred mappings are retained only as historical
 context and are not used for the final A/B/C/D classification.
 
-## Independent no-Proton retry control on 2026-09-29
+## Independent no-Proton equivalent-request control on 2026-09-29
 
 Tag: W1_REVIEW_NOTIFY_181737.
 
@@ -327,8 +332,10 @@ Each response POST received HTTP 404, represented by v0.0.10 as:
     response already fulfilled or unknown request
 
 This control independently demonstrates classification B without any Proton
-transition. It is strong evidence that the retry/redelivery mechanism can occur
-without the VPN fault.
+transition. It shows that two distinct tunnel requests carrying the same
+controlled payload can reach GWC and produce two local executions without a VPN
+fault. It does not establish that the second request is a retry/replay of the
+same logical operation.
 
 ## Accepted physical Proton run on 2026-09-29
 
@@ -393,10 +400,10 @@ whether the result had already been accepted or the request was unknown/expired.
 
 ### Request #2
 
-A second tunnel command for the same controlled tagged input was already
-created at:
+A second tunnel command carrying the same controlled tagged input had already
+reached tunnel-client and was entering local dispatch at:
 
-    time:                  18:30:09.577
+    local dispatch time:   18:30:09.577
     request_id:            cmd_12ba0814_d1c3_4356_9e15_07af93618e26
     cmd_request_id:        3c53f827-65e8-4c4c-959d-f6ad0c9b8266/f9gm
     rpc_request_id:        0
@@ -428,8 +435,9 @@ This is classification B:
 
 It is not A and not D.
 
-Most importantly, request #2 existed before the Proton outage began. The
-physical outage therefore did not originate the observed retry/redelivery.
+Most importantly, request #2 had already reached tunnel-client before the
+Proton outage began. The physical outage therefore did not originate the
+observed second request's local arrival.
 
 ## Causal conclusion
 
@@ -446,20 +454,23 @@ The accepted physical run establishes:
    classification is B;
 4. tunnel-client, GWC, and Herdr all retain the same process identities across
    the physical Proton transition;
-5. the second tunnel command was created before that Proton transition began.
+5. the second tunnel command had already reached tunnel-client and entered
+   local dispatch before that Proton transition began.
 
-The no-Proton control independently reproduces the same B pattern.
+The no-Proton control independently reproduces the same structural B pattern.
 
 Therefore the strongest supported causal statement is:
 
-    the duplicate execution is caused by an upstream retry/redelivery that
-    creates a fresh tunnel command; it is not caused by GWC locally
-    double-dispatching one request, and the observed Proton outage is not the
-    origin of the demonstrated retry.
+    the duplicate local execution is already present above the GWC dispatch
+    boundary: two distinct upstream/tunnel requests carrying the same
+    controlled payload each map one-to-one to one GWC receive and one local
+    execution.
 
-Wave 1 does not identify the exact upstream component that schedules the retry.
-It must not be narrowed to ChatGPT, the control plane, or another caller/product
-component without new evidence.
+This excludes local GWC double-dispatch and shows that the accepted Proton
+outage did not originate the second request's arrival at tunnel-client. Wave 1
+does not establish whether request #2 is a retry/replay/redelivery of request
+#1 according to any authoritative logical-operation identity, nor which
+upstream component emitted either request.
 
 ## Response-delivery semantics
 
@@ -486,10 +497,10 @@ blind replay of a mutating tool.
 
 Wave 2 should be identity/idempotency-first, not transport-restart-first.
 
-The evidence says that a local at-most-once mechanism keyed only by
-tunnel request_id or JSON-RPC id is insufficient to recognize all logical
-retries: a fresh tunnel request can preserve the same RPC id, and future
-evidence could still show retries that also change RPC id.
+The evidence says that tunnel request_id and JSON-RPC id alone are not enough
+to decide whether two equivalent requests represent one logical operation. A
+fresh tunnel request can preserve the same RPC id, but Wave 1 captured no
+authoritative logical-operation identity spanning the two requests.
 
 Before implementation, Wave 2 must decide:
 
@@ -512,6 +523,19 @@ transport behavior is implemented by Wave 1.
 Raw runs are kept below diagnostics/wave1-runs/ and are Git-ignored. They may
 contain local PIDs, routes, runtime paths, and tunnel correlation IDs.
 
+Because the original recorder allowlist omitted wave1_dispatch_id and trace_tag,
+the still-present primary tunnel-client log was used once to preserve verbatim,
+read-only source extracts for the accepted physical run, the no-Proton control,
+and the strong baseline. Each extract has a SHA-256 sidecar; the run-level
+extracts also record provenance. The accepted physical run now contains:
+
+    tunnel-boundary-events.raw.ndjson
+    tunnel-boundary-events.raw.ndjson.sha256
+    tunnel-boundary-events.provenance.txt
+
+The recorder allowlist now preserves wave1_dispatch_id and trace_tag for future
+diagnostic runs.
+
 The versioned artifacts contain no API key value, authorization header,
 environment dump, or arbitrary raw user command.
 
@@ -519,7 +543,9 @@ environment dump, or arbitrary raw user command.
 
 Still unresolved by local evidence:
 
-- which upstream/product component schedules the retry/redelivery;
+- what relationship, if any, exists between the two observed upstream requests,
+  including whether one is a retry/replay/redelivery of the other;
+- which upstream/product component emitted each request;
 - the authoritative logical-operation identity, if one exists above the tunnel
   request and JSON-RPC ids;
 - request-specific created_at and Mcp-Session-Id for the correlated commands;
@@ -531,12 +557,17 @@ These limits are material. Wave 1 intentionally does not infer beyond them.
 
 ## Verification
 
-Final verification after the diagnostic and documentation changes:
+Final verification after the diagnostic and documentation corrections:
 
 - focused Bun tracer tests: 3 passed, 0 failed, 41 expectations;
+- Python diagnostics tests: 22 passed;
 - TypeScript typecheck: passed;
 - runtime bundle build: passed;
 - tunnel-client diagnostic patch dry-run against pristine v0.0.10 source:
   passed;
 - tunnel-client diagnostic Go tests for pkg/dispatcher/internal: passed;
-- git diff --check: passed.
+- git diff --check for the working diff: passed;
+- git diff --check from Wave 1 base
+  82072f87cc5742d1d229dfe95d20289973e9768c through the corrected tree:
+  passed;
+- diagnostics/wave1-runs/session-20260929/final-gates.txt ends with RC=0.

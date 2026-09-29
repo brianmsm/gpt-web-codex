@@ -1,13 +1,7 @@
 --- a/pkg/dispatcher/internal/processor.go
 +++ b/pkg/dispatcher/internal/processor.go
-@@ -427,6 +427,7 @@
- 		return nil
- 	}
- 
+@@ -429,0 +430 @@
 +	injectWave1DispatchIdentity(logger, req)
- 	headers := ensureDefaultAcceptHeader(cmd.Headers())
- 	statusCode, respHeader, err := conn.Write(ctx, headers, req)
- 	statusCode = normalizeTransportStatusCode(statusCode, err)
 --- /dev/null
 +++ b/pkg/dispatcher/internal/wave1_trace.go
 @@ -0,0 +1,67 @@

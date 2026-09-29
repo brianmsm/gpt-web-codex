@@ -51,6 +51,10 @@ class RecorderUnitTests(unittest.TestCase):
         self.assertIn("HOME", env)
         self.assertIn("PATH", env)
 
+    def test_tunnel_event_allowlist_preserves_wave1_boundary_identity(self):
+        self.assertIn("wave1_dispatch_id", RECORDER.TUNNEL_EVENT_KEYS)
+        self.assertIn("trace_tag", RECORDER.TUNNEL_EVENT_KEYS)
+
     def test_tunnel_matcher_rejects_tmux_or_shell_wrapper(self):
         wrapped = {
             "cmdline": [
