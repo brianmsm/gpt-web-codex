@@ -153,6 +153,32 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
   }
 });
 
+test("lifecycle tracing serializes identity fields without payload content", () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-mcp-lifecycle-trace-"));
+  const tracePath = join(root, "lifecycle.ndjson");
+  try {
+    const tracer = new McpRequestTracer(tracePath);
+    tracer.recordLifecycle({
+      event_type: "request_received",
+      request_id: "rpc-123",
+      tool: "terminal_exec",
+      boundary_dispatch_id: "11111111-2222-4333-8444-555555555555",
+      mcp_session_id: "session-123",
+      jsonrpc_id: "jsonrpc-123",
+      identity: { local_execution_id: "exec-123", sanitized_digest: "abc" },
+    });
+    const event = JSON.parse(readFileSync(tracePath, "utf8").trim()) as Record<string, unknown>;
+    expect(event.schema).toBe(MCP_TRACE_SCHEMA);
+    expect(event.event_type).toBe("request_received");
+    expect(event.sdk_request_id).toBe("rpc-123");
+    expect(event.boundary_dispatch_id).toBe("11111111-2222-4333-8444-555555555555");
+    expect(event.local_execution_id).toBe("exec-123");
+    expect(JSON.stringify(event)).not.toContain("secret");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("trace output failure is fail-open for terminal_exec", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-mcp-trace-failure-"));
   let client: Client | undefined;
