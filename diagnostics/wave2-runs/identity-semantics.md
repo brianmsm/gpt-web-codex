@@ -45,6 +45,16 @@ There is no independently supplied `sdk_request_id` or `jsonrpc_id` in the lifec
 
 A JSON-RPC ID is a request/response correlation identifier. It is **not** treated as a logical-operation or idempotency identity. Wave 1 already demonstrated two distinct tunnel requests carrying the same JSON-RPC ID `0` and producing two local executions.
 
+### Correlation limit at the stdio response boundary
+
+The request-specific correlation is strongest from MCP receipt through `response_returned`, where `boundary_dispatch_id`, `trace_tag`, and `local_execution_id` are still present.
+
+At `response_created` and `response_handed_to_stdio`, the stdio transport receives only the already-built JSON-RPC response. The trace can therefore retain `jsonrpc_request_id`, but it no longer has the request-specific dispatch/execution fields.
+
+When `jsonrpc_request_id` is unique among live requests, the response-side events can be associated operationally with that request. When two live requests reuse the same JSON-RPC ID, the current GWC-side evidence cannot attribute each `response_created` / `response_handed_to_stdio` event uniquely to a particular `boundary_dispatch_id` or `local_execution_id`. Completion-time proximity is not treated as an identity contract.
+
+This is a diagnostic finding, not a request for Wave 2 to invent a stronger correlator. It further demonstrates that JSON-RPC identity is insufficient as an authoritative logical-operation identity.
+
 ## Identity matrix
 
 | Layer | Identifier | Stable across retry? | Evidence |
@@ -99,6 +109,8 @@ Each request independently reached:
 
 `request_received -> execution_started -> execution_finished -> response_created -> response_handed_to_stdio`.
 
+In this controlled run the two requests used distinct JSON-RPC IDs, so the stdio response-side events are distinguishable by `jsonrpc_request_id`. This run does not establish that the same attribution would remain possible if two concurrent requests reused the same JSON-RPC ID.
+
 This demonstrates that equivalent inputs do not create a shared logical-operation identity in GWC.
 
 ## Required questions
@@ -128,9 +140,11 @@ So the suffix changed. There is no evidence that the suffix specifically means â
 
 ### 5. Can a lost result be associated with the execution that produced it?
 
-Locally, yes when the correlation chain is present: `jsonrpc_request_id` / `boundary_dispatch_id` can be joined to a local execution UUID and then to the GWC stdio response boundary.
+Locally, the producing execution can be attributed strongly through `response_returned`: `boundary_dispatch_id`, `trace_tag`, and `local_execution_id` remain available on that request path.
 
-That does **not** establish remote acceptance. Wave 1's response-POST evidence remains the authority for tunnel delivery semantics: HTTP 200 proves accepted response delivery; timeout leaves remote acceptance unknown; HTTP 404 remains semantically ambiguous without stronger upstream evidence.
+The later GWC stdio boundary is weaker. `response_created` and `response_handed_to_stdio` retain only `jsonrpc_request_id`. If that ID is unique among live requests, the response can be associated operationally with the request. If two concurrent requests reuse the same JSON-RPC ID, Wave 2 does not have enough identity at the stdio transport to attribute each response-side event uniquely to the execution that produced it.
+
+That does **not** establish remote acceptance in either case. Wave 1's response-POST evidence remains the authority for tunnel delivery semantics: HTTP 200 proves accepted response delivery; timeout leaves remote acceptance unknown; HTTP 404 remains semantically ambiguous without stronger upstream evidence.
 
 ### 6. Is there enough information for safe deduplication?
 
@@ -146,6 +160,6 @@ A GWC-generated ID created only after a request arrives can identify that receip
 
 **Case C â€” partial identity.**
 
-Wave 2 now has strong intra-request correlation from MCP receipt through local execution and the GWC stdio response boundary. It still lacks an authoritative identity that is stable across separate upstream requests/retries.
+Wave 2 has strong request-specific correlation from MCP receipt through local execution and `response_returned`. The later GWC stdio response boundary is observable, but its attribution is only unambiguous while `jsonrpc_request_id` is unique among concurrent live requests. If the same JSON-RPC ID is reused concurrently, `response_created` and `response_handed_to_stdio` cannot be joined uniquely back to a particular dispatch/execution with the identities exposed at that layer.
 
-Therefore Wave 3 may reason about per-request lifecycle and ambiguous-result windows, but safe cross-request deduplication requires an additional upstream logical-operation identity (or an equivalent explicit contract). No dedup/journal design is implemented in this wave.
+It also still lacks an authoritative identity that is stable across separate upstream requests/retries. Therefore Wave 3 may reason about per-request lifecycle and ambiguous-result windows, but safe cross-request deduplication requires an additional upstream logical-operation identity (or an equivalent explicit contract). No dedup/journal design is implemented in this wave.
