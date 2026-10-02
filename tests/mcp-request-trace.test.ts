@@ -70,7 +70,7 @@ test("MCP request tracing is disabled by default and sanitizes tagged input iden
   expect(mcpTraceDispatchId(null)).toBeNull();
 });
 
-test("enabled MCP request tracing preserves SDK request ids and distinct local executions without changing tools/list", async () => {
+test("runtime tracing observes JSON-RPC lifecycle and distinct local executions without changing tools/list", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-mcp-trace-"));
   const tracePath = join(root, "gwc-requests.ndjson");
   let tracedClient: Client | undefined;
@@ -79,7 +79,7 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
     ({ client: tracedClient } = await connectClient(root, childEnv({ [MCP_TRACE_FILE_ENV]: tracePath })));
     const tracedTools = await tracedClient.listTools();
 
-    const tag = "wave1-test-stable";
+    const tag = "wave2-test-stable";
     const command = taggedCommand(tag, "RAW_SECRET_FIXTURE");
     const boundaryDispatchIds = [
       "11111111-2222-4333-8444-555555555555",
@@ -107,29 +107,31 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
     expect(traceText).not.toContain("printf");
     const events = traceText.trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
     expect(events.every(event => event.schema === MCP_TRACE_SCHEMA)).toBe(true);
-    expect(events.every(event => event.tool === "terminal_exec")).toBe(true);
-    expect(events.every(event => event.trace_tag === tag)).toBe(true);
 
-    const received = events.filter(event => event.phase === "received");
+    const phaseEvents = events.filter(event => typeof event.phase === "string");
+    expect(phaseEvents.every(event => event.tool === "terminal_exec")).toBe(true);
+    expect(phaseEvents.every(event => event.trace_tag === tag)).toBe(true);
+
+    const received = phaseEvents.filter(event => event.phase === "received");
     expect(received).toHaveLength(2);
-    expect(received[0]?.sdk_request_id).not.toEqual(received[1]?.sdk_request_id);
+    expect(received[0]?.jsonrpc_request_id).not.toEqual(received[1]?.jsonrpc_request_id);
     expect(received[0]?.input_digest).toEqual(received[1]?.input_digest);
     expect(received.map(event => event.boundary_dispatch_id)).toEqual(boundaryDispatchIds);
 
-    const requestIds = received.map(event => event.sdk_request_id);
+    const requestIds = received.map(event => event.jsonrpc_request_id);
     const executionIds: unknown[] = [];
     for (const requestId of requestIds) {
-      const requestEvents = events.filter(event => event.sdk_request_id === requestId);
-      expect(requestEvents.map(event => event.phase)).toEqual([
+      const requestPhaseEvents = phaseEvents.filter(event => event.jsonrpc_request_id === requestId);
+      expect(requestPhaseEvents.map(event => event.phase)).toEqual([
         "received",
         "execution_started",
         "execution_finished",
         "response_returned",
       ]);
-      expect(new Set(requestEvents.map(event => event.boundary_dispatch_id))).toEqual(
+      expect(new Set(requestPhaseEvents.map(event => event.boundary_dispatch_id))).toEqual(
         new Set([boundaryDispatchIds[requestIds.indexOf(requestId)]]),
       );
-      const started = requestEvents.find(event => event.phase === "execution_started");
+      const started = requestPhaseEvents.find(event => event.phase === "execution_started");
       expect(started?.local_execution_id).toBeTruthy();
       expect(started?.local_pid).toBeTruthy();
       if (process.platform === "linux") {
@@ -137,6 +139,24 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
         expect(started?.local_process_starttime_ticks).toBeTruthy();
       }
       executionIds.push(started?.local_execution_id);
+
+      const lifecycleEvents = events.filter(
+        event => event.jsonrpc_request_id === requestId && typeof event.event_type === "string",
+      );
+      expect(lifecycleEvents.map(event => event.event_type)).toEqual([
+        "request_received",
+        "execution_started",
+        "execution_finished",
+        "response_created",
+        "response_handed_to_stdio",
+      ]);
+      expect(lifecycleEvents[0]?.boundary_dispatch_id).toBe(
+        boundaryDispatchIds[requestIds.indexOf(requestId)],
+      );
+      expect(lifecycleEvents[0]?.mcp_session_id).toBeNull();
+      expect(lifecycleEvents[1]?.local_execution_id).toBe(started?.local_execution_id);
+      expect(lifecycleEvents[3]?.tool).toBeNull();
+      expect(lifecycleEvents[4]?.tool).toBeNull();
     }
     expect(executionIds[0]).not.toEqual(executionIds[1]);
 
@@ -153,27 +173,47 @@ test("enabled MCP request tracing preserves SDK request ids and distinct local e
   }
 });
 
-test("lifecycle tracing serializes identity fields without payload content", () => {
+test("lifecycle tracing allowlists identity fields and cannot forge reserved trace fields", () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-mcp-lifecycle-trace-"));
   const tracePath = join(root, "lifecycle.ndjson");
   try {
     const tracer = new McpRequestTracer(tracePath);
-    tracer.recordLifecycle({
+    const forgedInput = {
       event_type: "request_received",
-      request_id: "rpc-123",
+      jsonrpc_request_id: "rpc-123",
       tool: "terminal_exec",
       boundary_dispatch_id: "11111111-2222-4333-8444-555555555555",
       mcp_session_id: "session-123",
-      jsonrpc_id: "jsonrpc-123",
-      identity: { local_execution_id: "exec-123", sanitized_digest: "abc" },
-    });
+      local_execution_id: "exec-123",
+      schema: "forged",
+      sdk_request_id: "forged-rpc",
+      jsonrpc_id: "forged-jsonrpc",
+      command: "SUPER_SECRET",
+      token: "TOKEN_SECRET",
+      identity: {
+        schema: "forged-from-identity",
+        event_type: "response_handed_to_stdio",
+        command: "NESTED_SECRET",
+      },
+    } as unknown as Parameters<McpRequestTracer["recordLifecycle"]>[0];
+
+    tracer.recordLifecycle(forgedInput);
     const event = JSON.parse(readFileSync(tracePath, "utf8").trim()) as Record<string, unknown>;
+    const serialized = JSON.stringify(event);
     expect(event.schema).toBe(MCP_TRACE_SCHEMA);
     expect(event.event_type).toBe("request_received");
-    expect(event.sdk_request_id).toBe("rpc-123");
+    expect(event.jsonrpc_request_id).toBe("rpc-123");
     expect(event.boundary_dispatch_id).toBe("11111111-2222-4333-8444-555555555555");
     expect(event.local_execution_id).toBe("exec-123");
-    expect(JSON.stringify(event)).not.toContain("secret");
+    expect(event).not.toHaveProperty("sdk_request_id");
+    expect(event).not.toHaveProperty("jsonrpc_id");
+    expect(event).not.toHaveProperty("identity");
+    expect(event).not.toHaveProperty("command");
+    expect(event).not.toHaveProperty("token");
+    expect(serialized).not.toContain("SUPER_SECRET");
+    expect(serialized).not.toContain("TOKEN_SECRET");
+    expect(serialized).not.toContain("NESTED_SECRET");
+    expect(serialized).not.toContain("forged");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

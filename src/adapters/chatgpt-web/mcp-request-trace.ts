@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 export const MCP_TRACE_FILE_ENV = "CODEX_CHATGPT_WEB_MCP_TRACE_FILE";
-export const MCP_TRACE_SCHEMA = "gwc-mcp-trace/v1";
+export const MCP_TRACE_SCHEMA = "gwc-mcp-trace/v2";
 export const MCP_TRACE_DISPATCH_META_KEY = "io.openai.gwc/wave1-dispatch-id";
 
 export interface TerminalExecTraceInput {
@@ -38,7 +40,22 @@ export type McpLifecycleEvent =
   | "execution_started"
   | "execution_finished"
   | "response_created"
-  | "response_delivered";
+  | "response_handed_to_stdio";
+
+export interface McpLifecycleTraceEvent {
+  event_type: McpLifecycleEvent;
+  jsonrpc_request_id: RequestId;
+  tool?: string | null;
+  boundary_dispatch_id?: string | null;
+  mcp_session_id?: string | null;
+  trace_tag?: string | null;
+  input_digest?: string | null;
+  local_execution_id?: string | null;
+  local_pid?: number | null;
+  local_process_starttime_ticks?: string | null;
+  terminal_status?: string | null;
+  exit_code?: number | null;
+}
 
 const TRACE_TAG_PATTERN = /(?:^|[\s#;])GWC_TRACE_TAG=([A-Za-z0-9._:-]{1,128})(?=$|[\s;&|#])/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -65,6 +82,11 @@ function processStarttimeTicks(pid: number | undefined): string | null {
 function stableJson(value: Record<string, unknown>): string {
   const ordered = Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
   return JSON.stringify(ordered);
+}
+
+function jsonRpcResponseRequestId(message: JSONRPCMessage): RequestId | null {
+  if (!("id" in message) || (!("result" in message) && !("error" in message))) return null;
+  return typeof message.id === "string" || typeof message.id === "number" ? message.id : null;
 }
 
 export function terminalExecTraceIdentity(input: TerminalExecTraceInput): TerminalExecTraceIdentity {
@@ -102,15 +124,7 @@ export class McpRequestTracer {
     return this.filePath !== null;
   }
 
-  recordLifecycle(event: {
-    event_type: McpLifecycleEvent;
-    request_id: RequestId;
-    tool?: string | null;
-    boundary_dispatch_id?: string | null;
-    mcp_session_id?: string | null;
-    jsonrpc_id?: string | number | null;
-    identity?: Record<string, unknown>;
-  }): void {
+  recordLifecycle(event: McpLifecycleTraceEvent): void {
     if (!this.filePath) return;
     try {
       const payload = {
@@ -118,12 +132,20 @@ export class McpRequestTracer {
         wall_clock: new Date().toISOString(),
         monotonic_ns: process.hrtime.bigint().toString(),
         event_type: event.event_type,
-        sdk_request_id: event.request_id,
+        gwc_process_pid: process.pid,
+        gwc_process_starttime_ticks: processStarttimeTicks(process.pid),
+        jsonrpc_request_id: event.jsonrpc_request_id,
         tool: event.tool ?? null,
         boundary_dispatch_id: event.boundary_dispatch_id ?? null,
         mcp_session_id: event.mcp_session_id ?? null,
-        jsonrpc_id: event.jsonrpc_id ?? null,
-        ...event.identity,
+        trace_tag: event.trace_tag ?? null,
+        input_digest: event.input_digest ?? null,
+        local_execution_id: event.local_execution_id ?? null,
+        local_pid: event.local_pid ?? null,
+        local_process_starttime_ticks:
+          event.local_process_starttime_ticks ?? processStarttimeTicks(event.local_pid ?? undefined),
+        terminal_status: event.terminal_status ?? null,
+        exit_code: event.exit_code ?? null,
       };
       appendFileSync(this.filePath, `${JSON.stringify(payload)}\n`, { encoding: "utf8" });
     } catch {
@@ -147,7 +169,7 @@ export class McpRequestTracer {
         phase,
         gwc_process_pid: process.pid,
         gwc_process_starttime_ticks: processStarttimeTicks(process.pid),
-        sdk_request_id: requestId,
+        jsonrpc_request_id: requestId,
         tool: "terminal_exec",
         trace_tag: identity.trace_tag,
         input_digest: identity.input_digest,
@@ -161,6 +183,31 @@ export class McpRequestTracer {
       appendFileSync(this.filePath, `${JSON.stringify(event)}\n`, { encoding: "utf8" });
     } catch {
       // Diagnostics are deliberately fail-open: tracing must never change tool behavior.
+    }
+  }
+}
+
+export class TracingStdioServerTransport extends StdioServerTransport {
+  constructor(private readonly requestTrace: McpRequestTracer) {
+    super();
+  }
+
+  override async send(message: JSONRPCMessage): Promise<void> {
+    const requestId = jsonRpcResponseRequestId(message);
+    if (requestId !== null) {
+      this.requestTrace.recordLifecycle({
+        event_type: "response_created",
+        jsonrpc_request_id: requestId,
+      });
+    }
+
+    await super.send(message);
+
+    if (requestId !== null) {
+      this.requestTrace.recordLifecycle({
+        event_type: "response_handed_to_stdio",
+        jsonrpc_request_id: requestId,
+      });
     }
   }
 }

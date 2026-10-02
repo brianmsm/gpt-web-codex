@@ -1,5 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
@@ -15,7 +14,12 @@ import {
 } from "../../standalone/image-preview";
 import { LunaJobManager } from "../../standalone/luna-jobs";
 import { HerdrClient } from "../../standalone/herdr-client";
-import { McpRequestTracer, mcpTraceDispatchId, terminalExecTraceIdentity } from "./mcp-request-trace";
+import {
+  McpRequestTracer,
+  TracingStdioServerTransport,
+  mcpTraceDispatchId,
+  terminalExecTraceIdentity,
+} from "./mcp-request-trace";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
 import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
 import {
@@ -793,11 +797,38 @@ export async function runChatGptMcpServer(options: {
   }, async (input, extra) => {
     const traceIdentity = terminalExecTraceIdentity(input);
     const boundaryDispatchId = mcpTraceDispatchId(extra._meta);
+    const lifecycleBase = {
+      jsonrpc_request_id: extra.requestId,
+      tool: "terminal_exec" as const,
+      boundary_dispatch_id: boundaryDispatchId,
+      mcp_session_id: extra.sessionId ?? null,
+      trace_tag: traceIdentity.trace_tag,
+      input_digest: traceIdentity.input_digest,
+    };
+    requestTrace.recordLifecycle({ event_type: "request_received", ...lifecycleBase });
     requestTrace.recordTerminalExec("received", extra.requestId, traceIdentity, undefined, boundaryDispatchId);
+
     const started = direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode);
+    requestTrace.recordLifecycle({
+      event_type: "execution_started",
+      ...lifecycleBase,
+      local_execution_id: started.id,
+      local_pid: started.pid ?? null,
+      terminal_status: started.status,
+      exit_code: started.exitCode ?? null,
+    });
     requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started, boundaryDispatchId);
+
     const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms);
     if (completed.status !== "running") {
+      requestTrace.recordLifecycle({
+        event_type: "execution_finished",
+        ...lifecycleBase,
+        local_execution_id: completed.id,
+        local_pid: completed.pid ?? null,
+        terminal_status: completed.status,
+        exit_code: completed.exitCode ?? null,
+      });
       requestTrace.recordTerminalExec("execution_finished", extra.requestId, traceIdentity, completed, boundaryDispatchId);
     }
     const response = result(publicTerminal(completed));
@@ -835,7 +866,7 @@ export async function runChatGptMcpServer(options: {
   try {
     externalMcp = await ExternalMcpBridge.initialize({ configPath: options.externalMcpConfigPath });
     await externalMcp.registerTools(server, GWC_NATIVE_TOOL_NAMES);
-    await server.connect(new StdioServerTransport());
+    await server.connect(new TracingStdioServerTransport(requestTrace));
   } catch (error) {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
