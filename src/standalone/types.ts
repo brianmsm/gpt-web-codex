@@ -46,6 +46,7 @@ export interface LunaJob {
   pid?: number;
   exitCode?: number | null;
   terminalEvent?: string;
+  cancelRequestedAt?: string;
   finalMessage?: string;
   error?: string;
   mutationSeen: boolean;

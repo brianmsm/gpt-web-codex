@@ -177,17 +177,24 @@ export class LunaJobManager {
   }
 
   cancel(jobId: string): LunaJob {
+    const job = this.get(jobId);
+    if (job.status !== "queued" && job.status !== "running") return job;
+
+    const cancelRequestedAt = job.cancelRequestedAt ?? new Date().toISOString();
+    if (job.status === "queued") {
+      this.prompts.delete(jobId);
+      return this.store.updateJob(jobId, {
+        status: "cancelled", cancelRequestedAt, finishedAt: cancelRequestedAt, terminalEvent: "cancelled",
+      });
+    }
+
+    const updated = job.cancelRequestedAt ? job : this.store.updateJob(jobId, { cancelRequestedAt });
     const child = this.active.get(jobId);
-    if (child && !child.killed) {
+    if (!job.cancelRequestedAt && child && !child.killed) {
       child.kill("SIGTERM");
       setTimeout(() => { try { terminateOwnedProcessTree(child); } catch {} }, 5_000).unref?.();
     }
-    const job = this.get(jobId);
-    if (job.status === "queued" || job.status === "running") {
-      this.prompts.delete(jobId);
-      return this.store.updateJob(jobId, { status: "cancelled", finishedAt: new Date().toISOString(), terminalEvent: "cancelled" });
-    }
-    return job;
+    return updated;
   }
 
   private async run(jobId: string): Promise<void> {
@@ -217,6 +224,7 @@ export class LunaJobManager {
     this.active.set(jobId, child);
     this.store.updateJob(jobId, { status: "running", startedAt: new Date().toISOString(), pid: child.pid, attempts: queued.attempts + 1 });
     let terminalEvent: string | undefined;
+    let turnCompletedObservedBeforeCancel = false;
     let finalMessage: string | undefined;
     let lunaSessionId = binding.lunaSessionId;
     let mutationSeen = false;
@@ -245,7 +253,13 @@ export class LunaJobManager {
           lunaSessionId = event.thread_id;
           this.store.bindLunaSession(queued.webSessionId, event.thread_id);
         }
-        if (["turn.completed", "turn.failed", "error"].includes(String(event.type))) terminalEvent = String(event.type);
+        const eventType = String(event.type);
+        if (eventType === "turn.completed") {
+          if (!this.get(jobId).cancelRequestedAt) turnCompletedObservedBeforeCancel = true;
+          terminalEvent = "turn.completed";
+        } else if (["turn.failed", "error"].includes(eventType) && terminalEvent !== "turn.completed") {
+          terminalEvent = eventType;
+        }
         finalMessage = eventText(event) ?? finalMessage;
         mutationSeen ||= eventMutates(event);
         for (const path of eventImagePaths(event)) {
@@ -267,8 +281,19 @@ export class LunaJobManager {
     lines.close();
     this.active.delete(jobId);
     const current = this.get(jobId);
-    if (current.status === "cancelled") return;
-    const status = timedOut ? "timed_out" : outcome.code === 0 && terminalEvent === "turn.completed" ? "completed" : "failed";
+    const cancelRequested = Boolean(current.cancelRequestedAt);
+    const status = turnCompletedObservedBeforeCancel
+      ? "completed"
+      : cancelRequested
+        ? "cancelled"
+        : timedOut
+          ? "timed_out"
+          : outcome.code === 0 && terminalEvent === "turn.completed" ? "completed" : "failed";
+    const persistedTerminalEvent = turnCompletedObservedBeforeCancel
+      ? "turn.completed"
+      : timedOut
+        ? "timeout"
+        : cancelRequested ? terminalEvent ?? "cancelled" : terminalEvent;
     const finalImageArtifacts = finalMessage
       ? imagePaths(finalMessage).filter(path => existsSync(path) && statSync(path).isFile())
       : [];
@@ -281,14 +306,16 @@ export class LunaJobManager {
       status,
       finishedAt: new Date().toISOString(),
       exitCode: outcome.code,
-      terminalEvent: timedOut ? "timeout" : terminalEvent,
+      terminalEvent: persistedTerminalEvent,
       finalMessage,
       imageArtifacts: orderedImageArtifacts,
       recommendedImageArtifacts,
       lunaSessionId,
       mutationSeen,
       eventCount,
-      error: outcome.error?.message || (status === "failed" ? stderr.trim() || `Codex exited with ${outcome.code}` : undefined),
+      error: outcome.error?.message || (status === "failed"
+        ? stderr.trim() || `Codex exited with ${outcome.code}`
+        : status === "cancelled" ? stderr.trim() || undefined : undefined),
     });
   }
 }

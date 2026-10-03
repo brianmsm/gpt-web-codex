@@ -393,7 +393,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("codexluna_start", {
     title: "Start Luna execution",
-    description: "Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. If the start response is uncertain, inspect codexluna_session in the same web session and poll its last_job_id before creating another job. last_job_id is only a session-scoped reacquisition aid, not a logical-operation or idempotency key. Omit web_session_id to use ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
+    description: "Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. Recovery of a specific start requires that start's exact job_id. codexluna_session.last_job_id reports only the most recently created job and cannot identify a specific start after another start may have occurred, even with identical inputs. Omit web_session_id to use authoritative ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
     inputSchema: {
       web_session_id: sessionId.optional(),
       prompt: z.string().min(1).max(1_000_000),
@@ -438,6 +438,7 @@ export async function runChatGptMcpServer(options: {
     inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: {
       web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus, recovery_outcome: recoveryOutcome,
+      cancel_requested: z.boolean(), cancel_requested_at: z.string().nullable(),
       luna_session_id: z.string().nullable(), workspace_path: z.string(), permission_mode: sandbox,
       terminal_event: z.string().nullable(), final_message: z.string().nullable(), error: z.string().nullable(),
       mutation_seen: z.boolean(), event_count: z.number().int().nonnegative(),
@@ -478,8 +479,9 @@ export async function runChatGptMcpServer(options: {
     const imageContentReturned = imageAvailable && !imagePreviewAlreadyPresented;
     return lunaStatusResult({
       web_session_id: job.webSessionId,
-      job_id: job.id, status: job.status, recovery_outcome: lunaRecoveryOutcome(job), luna_session_id: job.lunaSessionId ?? null,
-      workspace_path: job.cwd, permission_mode: job.sandbox,
+      job_id: job.id, status: job.status, recovery_outcome: lunaRecoveryOutcome(job),
+      cancel_requested: Boolean(job.cancelRequestedAt), cancel_requested_at: job.cancelRequestedAt ?? null,
+      luna_session_id: job.lunaSessionId ?? null, workspace_path: job.cwd, permission_mode: job.sandbox,
       terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
       image_artifacts: job.imageArtifacts ?? [], image_preview_rendered: false, image_content_returned: imageContentReturned,
@@ -491,10 +493,11 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("codexluna_cancel", {
     title: "Cancel Luna execution",
-    description: "Cancel only a Luna process owned by the current web session; the conversation binding is preserved. Cancellation does not prove that earlier local side effects did not occur, so inspect recovery_outcome before deciding what to do next.",
+    description: "Request cancellation only for a Luna process owned by the current web session; the conversation binding is preserved. A running job remains running until its child reaches a terminal state. Cancellation does not prove that earlier local side effects did not occur, and a turn.completed observed before the cancellation request is preserved as completion.",
     inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: {
       web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus, recovery_outcome: recoveryOutcome,
+      cancel_requested: z.boolean(), cancel_requested_at: z.string().nullable(),
       luna_session_id: z.string().nullable(), session_policy: compactPolicySchema,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -507,13 +510,15 @@ export async function runChatGptMcpServer(options: {
       job_id: job.id,
       status: job.status,
       recovery_outcome: lunaRecoveryOutcome(job),
+      cancel_requested: Boolean(job.cancelRequestedAt),
+      cancel_requested_at: job.cancelRequestedAt ?? null,
       luna_session_id: job.lunaSessionId ?? null,
     });
   });
 
   server.registerTool("codexluna_session", {
     title: "Inspect Luna session binding",
-    description: "Inspect the durable Luna binding for this ChatGPT conversation. last_job_id can help reacquire the most recently created job in this same web session after an uncertain start response, but it can be superseded and is not a logical-operation or idempotency key. Omit web_session_id to use ChatGPT conversation metadata when available. This does not initialize a new conversation; use codexluna_init first.",
+    description: "Inspect the durable Luna binding for this ChatGPT conversation. last_job_id is informational only: it reports the most recently created job, can be superseded by any later start including an identical one, and must not be used to reacquire a specific start. Recovery of a specific operation requires its exact job_id. Omit web_session_id to use authoritative ChatGPT conversation metadata when available. This does not initialize a new conversation; use codexluna_init first.",
     inputSchema: { web_session_id: sessionId.optional() },
     outputSchema: {
       binding: z.object({

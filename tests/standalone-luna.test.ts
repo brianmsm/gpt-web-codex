@@ -495,6 +495,138 @@ test("openai/session is authoritative over explicit web_session_id across Luna r
   }
 });
 
+test("last_job_id is latest-job information, not reacquisition identity for an earlier same-payload start", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-wave4-last-job-race-"));
+  const statePath = join(root, "state.json");
+  const webSessionId = "chatgpt:wave4-last-job-race";
+  const jobAId = "77777777-7777-4777-8777-777777777777";
+  const jobBId = "88888888-8888-4888-8888-888888888888";
+  const store = new LunaStateStore(statePath);
+  store.initializeBinding(webSessionId, {
+    workspacePath: root, permissionMode: "read-only", model: "gpt-5.6-luna", reasoning: "low",
+    fast: true, timeoutMs: 900_000, sessionPolicyVersion: 1,
+  });
+  const common = {
+    ...sampleJob(root), webSessionId, status: "completed" as const, attempts: 1,
+    terminalEvent: "turn.completed", finishedAt: new Date().toISOString(),
+  };
+  store.putJob({ ...common, id: jobAId, finalMessage: "result-A" });
+  store.putJob({ ...common, id: jobBId, finalMessage: "result-B" });
+
+  const client = new Client({ name: "webgpt-wave4-last-job-test", version: "1.0.0" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
+    }));
+    const session = await client.callTool({ name: "codexluna_session", arguments: { web_session_id: webSessionId } });
+    expect(session.isError).not.toBe(true);
+    expect(session.structuredContent).toMatchObject({
+      binding: { web_session_id: webSessionId, last_job_id: jobBId },
+    });
+
+    const exactA = await client.callTool({
+      name: "codexluna_status", arguments: { web_session_id: webSessionId, job_id: jobAId },
+    });
+    expect(exactA.isError).not.toBe(true);
+    expect(exactA.structuredContent).toMatchObject({ job_id: jobAId, final_message: "result-A" });
+
+    const latestB = await client.callTool({
+      name: "codexluna_status", arguments: { web_session_id: webSessionId, job_id: jobBId },
+    });
+    expect(latestB.isError).not.toBe(true);
+    expect(latestB.structuredContent).toMatchObject({ job_id: jobBId, final_message: "result-B" });
+
+    const tools = (await client.listTools()).tools;
+    expect(tools.find(tool => tool.name === "codexluna_start")?.description).toContain("exact job_id");
+    expect(tools.find(tool => tool.name === "codexluna_session")?.description).toContain("informational only");
+    expect(tools.find(tool => tool.name === "codexluna_session")?.description).toContain("must not be used to reacquire a specific start");
+  } finally {
+    await client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Luna preserves completion observed before a cancellation request", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-wave4-complete-before-cancel-"));
+  const manager = new LunaJobManager(new LunaStateStore(join(root, "state.json")), (_command, _args, cwd) => {
+    const script = [
+      "process.stdin.resume();",
+      "setTimeout(()=>{",
+      "console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'done-before-cancel'}}));",
+      "console.log(JSON.stringify({type:'turn.completed'}));",
+      "},20);",
+      "setTimeout(()=>process.exit(0),1000);",
+    ].join("");
+    return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  }, join(root, "logs"), process.execPath);
+  try {
+    const job = manager.start({ webSessionId: "chatgpt:complete-before-cancel", prompt: "complete then wait", cwd: root });
+    await eventually(() => {
+      const current = manager.get(job.id);
+      return existsSync(current.logPath) && readFileSync(current.logPath, "utf8").includes('"turn.completed"');
+    });
+
+    const requested = manager.cancel(job.id);
+    expect(requested.status).toBe("running");
+    expect(requested.cancelRequestedAt).toBeString();
+    await eventually(() => manager.get(job.id).status !== "running");
+
+    const final = manager.get(job.id);
+    expect(final.status).toBe("completed");
+    expect(final.terminalEvent).toBe("turn.completed");
+    expect(final.finalMessage).toBe("done-before-cancel");
+    expect(final.eventCount).toBeGreaterThanOrEqual(2);
+    expect(final.cancelRequestedAt).toBeString();
+    expect(final.finishedAt).toBeString();
+    expect(lunaRecoveryOutcome(final)).toBe("known_completion");
+  } finally {
+    manager.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Luna preserves evidence when cancellation is requested before later completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-wave4-cancel-before-complete-"));
+  const manager = new LunaJobManager(new LunaStateStore(join(root, "state.json")), (_command, _args, cwd) => {
+    const script = [
+      "process.stdin.resume();",
+      "process.on('SIGTERM',()=>{});",
+      "console.log(JSON.stringify({type:'thread.started',thread_id:'cancel-race-thread'}));",
+      "setTimeout(()=>{",
+      "console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'done-after-cancel'}}));",
+      "console.log(JSON.stringify({type:'turn.completed'}));",
+      "setTimeout(()=>process.exit(0),20);",
+      "},100);",
+    ].join("");
+    return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  }, join(root, "logs"), process.execPath);
+  try {
+    const job = manager.start({ webSessionId: "chatgpt:cancel-before-complete", prompt: "wait after cancel", cwd: root });
+    await eventually(() => {
+      const current = manager.get(job.id);
+      return existsSync(current.logPath) && readFileSync(current.logPath, "utf8").includes('"thread.started"');
+    });
+
+    const requested = manager.cancel(job.id);
+    expect(requested.status).toBe("running");
+    expect(requested.cancelRequestedAt).toBeString();
+    await eventually(() => manager.get(job.id).status !== "running");
+
+    const final = manager.get(job.id);
+    expect(final.status).toBe("cancelled");
+    expect(final.terminalEvent).toBe("turn.completed");
+    expect(final.finalMessage).toBe("done-after-cancel");
+    expect(final.eventCount).toBeGreaterThanOrEqual(3);
+    expect(final.exitCode).toBe(0);
+    expect(final.cancelRequestedAt).toBeString();
+    expect(final.finishedAt).toBeString();
+    expect(lunaRecoveryOutcome(final)).toBe("ambiguous");
+  } finally {
+    manager.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("direct files enforce the disclosed workspace and permission mode", () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-files-"));
   const workspace = join(root, "workspace");
@@ -649,7 +781,8 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("external MCP namespace");
     expect(client.getInstructions()).toContain("not permission to repeat it automatically");
-    expect(client.getInstructions()).toContain("last_job_id is only a same-session reacquisition aid");
+    expect(client.getInstructions()).toContain("last_job_id is informational only");
+    expect(client.getInstructions()).toContain("exact job_id returned by that start");
     expect(client.getInstructions()).toContain("openai/session metadata, that metadata is the authoritative web-session identity");
     expect(client.getInstructions()).toContain("recovery_outcome=ambiguous");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
