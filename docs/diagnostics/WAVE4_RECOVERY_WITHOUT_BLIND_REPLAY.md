@@ -52,13 +52,19 @@ This intentionally narrows recovery rather than disabling it: the caller can sti
 
 ### Luna reacquisition and session scope
 
-`codexluna_session.last_job_id` remains a bounded same-web-session reacquisition aid. If a start response is uncertain, the client is instructed to inspect the current conversation binding and poll that existing job before considering another start.
+`codexluna_session.last_job_id` is informational only: it reports the most recently created job in the same web session. It is not safe reacquisition identity for a specific `codexluna_start`, because any later start, including an identical one, overwrites it.
 
-`last_job_id` is not a logical-operation ID, can be superseded by a later start, does not deduplicate equivalent requests, and must not cross web sessions.
+Recovery of a specific Luna start therefore requires that start's exact `job_id`. If the response carrying that exact handle was lost, the specific operation remains ambiguous; a later `last_job_id` must not be substituted. `last_job_id` is not a logical-operation ID, does not deduplicate equivalent requests, and must not cross web sessions.
 
 When ChatGPT supplies `_meta["openai/session"]`, that metadata is the authoritative source of the web-session identity. An explicit `web_session_id` is accepted alongside it only when it exactly matches the derived canonical ID; a mismatch is rejected before `init`, `start`, `status`, `cancel`, or `session` can read or mutate session state. Explicit `web_session_id` remains a fallback only when `openai/session` metadata is absent.
 
 `codexluna_status` and `codexluna_cancel` resolve the current web session under that authority rule and reject a job owned by another web session. Their public output includes `recovery_outcome`.
+
+### Luna cancellation ordering
+
+Cancellation of a running Luna job is a request, not an immediate terminal state. The job records `cancelRequestedAt`, remains `running`, and reaches a terminal status only when the child terminates. This preserves evidence observed between the request and process close.
+
+If `turn.completed` was already observed before cancellation was requested, the final job remains `completed` and its message/event evidence is retained even if the subsequent signal changes the process exit code. If cancellation is requested first and `turn.completed` arrives later, the final status remains conservatively `cancelled`/ambiguous while preserving the observed terminal event, final message, event count, and exit code.
 
 ### Terminal recovery
 
@@ -78,7 +84,7 @@ No bridge execution mechanism changed. The bridge still performs one remote `cal
 
 - Poll/status/read/wait of already known local work.
 - Same-session Luna status by known job ID.
-- Same-session lookup of `last_job_id` as a reacquisition hint.
+- Same-session inspection of `last_job_id` only as "latest job known" information; specific-operation recovery still requires the exact `job_id`.
 - Terminal status/stdin/cancel by exact known terminal job ID.
 - Herdr read/status/wait by exact pane ID.
 - Transport/session recovery that does not invoke the operation again.
@@ -113,8 +119,8 @@ Wave 4 does not promise that process crash and graceful shutdown have identical 
 ## Public schema changes
 
 - Luna job status now includes `ambiguous`.
-- `codexluna_status` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome`.
-- `codexluna_cancel` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome`.
+- `codexluna_status` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
+- `codexluna_cancel` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
 - Tool descriptions/instructions document same-session reacquisition and no-replay boundaries.
 
 No terminal, Herdr, or external-MCP result schema was expanded with speculative ambiguity fields because those layers do not expose a new reliable ambiguity detector in this wave.
@@ -125,6 +131,8 @@ No terminal, Herdr, or external-MCP result schema was expanded with speculative 
 - Interrupted persisted Luna work becomes public `ambiguous`, not false `failed`.
 - Luna status rejects a job from another web session and another session does not inherit `last_job_id`.
 - Metadata session B plus explicit `web_session_id` A is rejected uniformly by `init`, `start`, `status`, `cancel`, and `session`; matching metadata+explicit identity and metadata-only lookup remain valid.
+- `last_job_id` is proven unsafe for A-specific recovery when A is followed by same-payload B; exact `job_id` still recovers A.
+- Cancellation races cover both `completion -> cancel -> close` and `cancel -> completion/close` while preserving observed evidence.
 - Two equivalent concurrent terminal starts remain distinct jobs and produce distinct processes/results.
 - Herdr/MCP instructions explicitly forbid automatic resend after uncertain `pane_run` acknowledgement/result.
 - Existing request-trace/harness and external-MCP timeout regression tests remain green.
