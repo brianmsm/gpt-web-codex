@@ -13,7 +13,7 @@ import {
   IMAGE_PREVIEW_RESOURCE_URI,
   LEGACY_IMAGE_PREVIEW_RESOURCE_URIS,
 } from "../src/standalone/image-preview";
-import { LunaJobManager } from "../src/standalone/luna-jobs";
+import { LunaJobManager, lunaRecoveryOutcome } from "../src/standalone/luna-jobs";
 import { MCP_SERVER_INSTRUCTIONS } from "../src/standalone/session-policy";
 import { LunaStateStore } from "../src/standalone/state-store";
 import type { LunaJob } from "../src/standalone/types";
@@ -310,11 +310,79 @@ test("failed, timed-out, and interrupted jobs preserve their Luna binding", asyn
     const interrupted = { ...sampleJob(root), id: "interrupted-job", webSessionId, status: "running" as const };
     interruptedStore.putJob(interrupted);
     const recovered = new LunaJobManager(interruptedStore, undefined, join(root, "logs-recovered"));
-    expect(recovered.get(interrupted.id).status).toBe("failed");
+    expect(recovered.get(interrupted.id).status).toBe("ambiguous");
     expect(recovered.get(interrupted.id).terminalEvent).toBe("runtime_restarted");
+    expect(recovered.get(interrupted.id).error).toContain("Local side effects may have occurred");
+    expect(lunaRecoveryOutcome(recovered.get(interrupted.id))).toBe("ambiguous");
     expect(recovered.store.binding(webSessionId)?.lunaSessionId).toBe("luna-thread-survives");
     recovered.shutdown();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Luna does not blindly replay a transient-looking failure without observed mutation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-luna-no-replay-"));
+  const effectPath = join(root, "effect.txt");
+  let invocations = 0;
+  try {
+    const manager = new LunaJobManager(new LunaStateStore(join(root, "state.json")), (_command, _args, cwd) => {
+      invocations += 1;
+      const script = `process.stdin.resume();require('node:fs').appendFileSync(${JSON.stringify(effectPath)},'x\\n');process.stderr.write('ECONNRESET');process.exitCode=1;`;
+      return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    }, join(root, "logs"), process.execPath);
+    const job = manager.start({ webSessionId: "chatgpt:wave4-no-replay", prompt: "may mutate", cwd: root });
+    await eventually(() => manager.get(job.id).status === "failed");
+    const final = manager.get(job.id);
+    expect(final.mutationSeen).toBe(false);
+    expect(final.attempts).toBe(1);
+    expect(invocations).toBe(1);
+    expect(readFileSync(effectPath, "utf8").trim().split(/\n/)).toEqual(["x"]);
+    expect(lunaRecoveryOutcome(final)).toBe("ambiguous");
+    manager.shutdown();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Luna reacquisition is session-scoped and restart ambiguity is public", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-wave4-session-scope-"));
+  const statePath = join(root, "state.json");
+  const sessionA = "chatgpt:wave4-session-a";
+  const sessionB = "chatgpt:wave4-session-b";
+  const jobId = "55555555-5555-4555-8555-555555555555";
+  const store = new LunaStateStore(statePath);
+  const binding = {
+    workspacePath: root, permissionMode: "workspace-write" as const, model: "gpt-5.6-luna", reasoning: "low" as const,
+    fast: true, timeoutMs: 900_000, sessionPolicyVersion: 1,
+  };
+  store.initializeBinding(sessionA, binding);
+  store.initializeBinding(sessionB, binding);
+  store.putJob({ ...sampleJob(root), id: jobId, webSessionId: sessionA, status: "running" });
+  const client = new Client({ name: "webgpt-wave4-scope-test", version: "1.0.0" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
+    }));
+    const sameSession = await client.callTool({
+      name: "codexluna_status", arguments: { web_session_id: sessionA, job_id: jobId },
+    });
+    expect(sameSession.isError).not.toBe(true);
+    expect(sameSession.structuredContent).toMatchObject({
+      web_session_id: sessionA, job_id: jobId, status: "ambiguous", recovery_outcome: "ambiguous",
+    });
+    expect(JSON.stringify(sameSession.structuredContent)).toContain("Local side effects may have occurred");
+
+    const crossSession = await client.callTool({
+      name: "codexluna_status", arguments: { web_session_id: sessionB, job_id: jobId },
+    });
+    expect(crossSession.isError).toBe(true);
+    expect(JSON.stringify(crossSession.content)).toContain("current web session");
+
+    const otherBinding = await client.callTool({ name: "codexluna_session", arguments: { web_session_id: sessionB } });
+    expect(otherBinding.structuredContent).toMatchObject({ binding: { web_session_id: sessionB, last_job_id: null } });
+  } finally {
+    await client.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -419,6 +487,34 @@ test("direct terminal waits for output and supports stdin", async () => {
   }
 });
 
+test("equivalent terminal starts remain independent local jobs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-terminal-concurrency-"));
+  const tools = new DirectToolService();
+  try {
+    const exe = process.execPath;
+    const command = process.platform === "win32"
+      ? `& '${exe.replaceAll("'", "''")}' -p 'process.pid'`
+      : `"${exe.replaceAll('"', '\\"')}" -p 'process.pid'`;
+    const first = tools.startTerminal(command, ".", root, "workspace-write");
+    const second = tools.startTerminal(command, ".", root, "workspace-write");
+    expect(first.id).not.toBe(second.id);
+    const [firstDone, secondDone] = await Promise.all([
+      tools.waitTerminal(first.id, 5_000),
+      tools.waitTerminal(second.id, 5_000),
+    ]);
+    expect(firstDone.status).toBe("completed");
+    expect(secondDone.status).toBe("completed");
+    expect(firstDone.stdout.trim()).toMatch(/^\d+$/);
+    expect(secondDone.stdout.trim()).toMatch(/^\d+$/);
+    expect(firstDone.stdout.trim()).not.toBe(secondDone.stdout.trim());
+    expect(tools.terminal(first.id).id).toBe(first.id);
+    expect(tools.terminal(second.id).id).toBe(second.id);
+  } finally {
+    tools.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("standalone MCP exposes Luna direct and Herdr tools without a turn broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-"));
   const transport = new StdioClientTransport({
@@ -444,6 +540,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("external MCP namespace");
+    expect(client.getInstructions()).toContain("not permission to repeat it automatically");
+    expect(client.getInstructions()).toContain("last_job_id is only a same-session reacquisition aid");
+    expect(client.getInstructions()).toContain("recovery_outcome=ambiguous");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
     expect(client.getInstructions()).toContain("Herdr panes contain persistent shells");
     expect(client.getInstructions()).toContain("choose a fresh unique nonce before herdr_pane_run");
@@ -456,6 +555,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("literal printf placeholder %d");
     expect(client.getInstructions()).not.toContain("__HERDR_CMD_DONE__:%d");
     expect(client.getInstructions()).toContain("pane health says whether the shell is alive, not whether the last command is still running");
+    expect(client.getInstructions()).toContain("never resend the command automatically");
     expect(client.getInstructions()).toContain("Do not keep waiting for a success-specific output string after the shell prompt has returned");
     expect(client.getInstructions()).toContain("Never fabricate HERDR_ENV");
     expect(client.getInstructions()).not.toMatch(/[\u3400-\u9fff]/);
@@ -502,6 +602,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(herdrRead?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(herdrRun?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     expect(herdrRun?.description).toContain("a healthy pane means the shell is alive, not that the last command is still running");
+    expect(herdrRun?.description).toContain("never resend the command automatically");
     expect(herdrRun?.description).toContain("choose a fresh unique nonce before each herdr_pane_run");
     expect(herdrRun?.description).toContain("__HERDR_CMD_DONE_%s__:%d");
     expect(herdrRun?.description).toContain("match=\"__HERDR_CMD_DONE_7f3c2d__:\"");
@@ -757,7 +858,7 @@ test("completed Luna status does not recommend an intermediate-only image", asyn
     await client.connect(new StdioClientTransport({
       command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
     }));
-    const output = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    const output = await client.callTool({ name: "codexluna_status", arguments: { web_session_id: storedJob.webSessionId, job_id: storedJob.id } });
     expect(output.isError).not.toBe(true);
     expect(output.structuredContent).toMatchObject({
       image_artifacts: [imagePath], image_content_returned: false, image_preview_recommended: false,
@@ -801,7 +902,7 @@ test("completed Luna image status returns native image content without binding i
     expect(statusTool?._meta?.["ui/resourceUri"]).toBeUndefined();
     expect(statusTool?._meta?.ui).toBeUndefined();
     expect(tools.tools.find(tool => tool.name === "file_image_preview")?._meta?.["openai/outputTemplate"]).toBe(IMAGE_PREVIEW_RESOURCE_URI);
-    const output = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    const output = await client.callTool({ name: "codexluna_status", arguments: { web_session_id: storedJob.webSessionId, job_id: storedJob.id } });
     expect(output.isError).not.toBe(true);
     expect(output.structuredContent).toMatchObject({
       status: "completed", workspace_path: root, permission_mode: "read-only",
@@ -816,7 +917,7 @@ test("completed Luna image status returns native image content without binding i
     expect(statusContent.image_preview_id).toBeNull();
     expect(statusContent.image_preview_content_key).toMatch(/^[a-f0-9]{64}$/);
     if (!statusContent.image_preview_content_key) throw new Error("status did not return an image preview content key");
-    const repeatedStatus = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    const repeatedStatus = await client.callTool({ name: "codexluna_status", arguments: { web_session_id: storedJob.webSessionId, job_id: storedJob.id } });
     expect(repeatedStatus.isError).not.toBe(true);
     expect((repeatedStatus.structuredContent as { image_preview_content_key: string | null }).image_preview_content_key)
       .toBe(statusContent.image_preview_content_key);
@@ -847,7 +948,7 @@ test("completed Luna image status returns native image content without binding i
       contentKey: statusContent.image_preview_content_key, previewId: renderedContent.preview_id,
     }]);
 
-    const statusAfterPresentation = await client.callTool({ name: "codexluna_status", arguments: { job_id: storedJob.id } });
+    const statusAfterPresentation = await client.callTool({ name: "codexluna_status", arguments: { web_session_id: storedJob.webSessionId, job_id: storedJob.id } });
     expect(statusAfterPresentation.isError).not.toBe(true);
     expect(statusAfterPresentation.structuredContent).toMatchObject({
       image_content_returned: false, image_preview_recommended: false, image_preview_already_presented: true,

@@ -12,7 +12,7 @@ import {
   IMAGE_PREVIEW_RESOURCE_URI,
   LEGACY_IMAGE_PREVIEW_RESOURCE_URIS,
 } from "../../standalone/image-preview";
-import { LunaJobManager } from "../../standalone/luna-jobs";
+import { LunaJobManager, lunaRecoveryOutcome } from "../../standalone/luna-jobs";
 import { HerdrClient } from "../../standalone/herdr-client";
 import {
   McpRequestTracer,
@@ -36,7 +36,8 @@ import { VERSION } from "../../version";
 const sessionId = z.string().min(8).max(256);
 const sandbox = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const reasoning = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
-const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out", "cancelled"]);
+const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out", "cancelled", "ambiguous"]);
+const recoveryOutcome = z.enum(["known_completion", "known_local_failure", "running_recoverable", "ambiguous"]);
 const compactPolicySchema = z.string();
 const noAuth = [{ type: "noauth" as const }];
 
@@ -387,7 +388,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("codexluna_start", {
     title: "Start Luna execution",
-    description: "Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. Omit web_session_id to use ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
+    description: "Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. If the start response is uncertain, inspect codexluna_session in the same web session and poll its last_job_id before creating another job. last_job_id is only a session-scoped reacquisition aid, not a logical-operation or idempotency key. Omit web_session_id to use ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
     inputSchema: {
       web_session_id: sessionId.optional(),
       prompt: z.string().min(1).max(1_000_000),
@@ -428,10 +429,10 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("codexluna_status", {
     title: "Get Luna execution status",
-    description: "Poll an asynchronous Luna task. Completed results are compact; full JSONL remains in the local log. The first verified user-relevant image artifact may be returned as native MCP image content and marked image_preview_recommended so ChatGPT can present it exactly once through file_image_preview. This status tool never mounts preview UI itself.",
-    inputSchema: { job_id: z.string().uuid() },
+    description: "Poll an asynchronous Luna task owned by the current web session. recovery_outcome distinguishes known completion, known local failure, running/recoverable work, and ambiguity. ambiguous means local side effects may have occurred and does not authorize automatic replay. Completed results are compact; full JSONL remains in the local log. The first verified user-relevant image artifact may be returned as native MCP image content and marked image_preview_recommended so ChatGPT can present it exactly once through file_image_preview. This status tool never mounts preview UI itself.",
+    inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: {
-      web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus,
+      web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus, recovery_outcome: recoveryOutcome,
       luna_session_id: z.string().nullable(), workspace_path: z.string(), permission_mode: sandbox,
       terminal_event: z.string().nullable(), final_message: z.string().nullable(), error: z.string().nullable(),
       mutation_seen: z.boolean(), event_count: z.number().int().nonnegative(),
@@ -447,8 +448,9 @@ export async function runChatGptMcpServer(options: {
       "openai/toolInvocation/invoking": "Checking Luna task",
       "openai/toolInvocation/invoked": "Luna task status updated",
     },
-  }, async ({ job_id }) => {
-    const job = jobs.get(job_id);
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, false);
+    const job = jobs.getForSession(input.job_id, webSessionId);
     let preview: Awaited<ReturnType<DirectToolService["readForTransfer"]>> | undefined;
     let previewError: string | null = null;
     const recommendedImageArtifacts = job.recommendedImageArtifacts
@@ -471,7 +473,7 @@ export async function runChatGptMcpServer(options: {
     const imageContentReturned = imageAvailable && !imagePreviewAlreadyPresented;
     return lunaStatusResult({
       web_session_id: job.webSessionId,
-      job_id: job.id, status: job.status, luna_session_id: job.lunaSessionId ?? null,
+      job_id: job.id, status: job.status, recovery_outcome: lunaRecoveryOutcome(job), luna_session_id: job.lunaSessionId ?? null,
       workspace_path: job.cwd, permission_mode: job.sandbox,
       terminal_event: job.terminalEvent ?? null, final_message: job.finalMessage ?? null,
       error: job.error ?? null, mutation_seen: job.mutationSeen, event_count: job.eventCount,
@@ -484,27 +486,29 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("codexluna_cancel", {
     title: "Cancel Luna execution",
-    description: "Cancel only the owned Luna process for a queued or running task; the conversation binding is preserved.",
-    inputSchema: { job_id: z.string().uuid() },
+    description: "Cancel only a Luna process owned by the current web session; the conversation binding is preserved. Cancellation does not prove that earlier local side effects did not occur, so inspect recovery_outcome before deciding what to do next.",
+    inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: {
-      web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus,
+      web_session_id: sessionId, job_id: z.string().uuid(), status: jobStatus, recovery_outcome: recoveryOutcome,
       luna_session_id: z.string().nullable(), session_policy: compactPolicySchema,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: noAuth },
-  }, async ({ job_id }) => {
-    const job = jobs.cancel(job_id);
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, false);
+    const job = jobs.cancelForSession(input.job_id, webSessionId);
     return lunaResult({
       web_session_id: job.webSessionId,
       job_id: job.id,
       status: job.status,
+      recovery_outcome: lunaRecoveryOutcome(job),
       luna_session_id: job.lunaSessionId ?? null,
     });
   });
 
   server.registerTool("codexluna_session", {
     title: "Inspect Luna session binding",
-    description: "Inspect the durable Luna binding for this ChatGPT conversation. Omit web_session_id to use ChatGPT conversation metadata when available. This does not initialize a new conversation; use codexluna_init first.",
+    description: "Inspect the durable Luna binding for this ChatGPT conversation. last_job_id can help reacquire the most recently created job in this same web session after an uncertain start response, but it can be superseded and is not a logical-operation or idempotency key. Omit web_session_id to use ChatGPT conversation metadata when available. This does not initialize a new conversation; use codexluna_init first.",
     inputSchema: { web_session_id: sessionId.optional() },
     outputSchema: {
       binding: z.object({
@@ -774,7 +778,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("terminal_start", {
     title: "Start a local terminal command",
-    description: "Start an asynchronous PowerShell command on Windows (sh on Linux). Direct terminal execution is disabled in read-only mode.",
+    description: "Start an asynchronous PowerShell command on Windows (sh on Linux). If the response containing job_id is lost, there is no safe lookup by command or arguments; do not resubmit automatically. Direct terminal execution is disabled in read-only mode.",
     inputSchema: { command: z.string().min(1).max(100_000), cwd: z.string().default("."), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write") },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -783,7 +787,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("terminal_exec", {
     title: "Run a local terminal command and read its output",
-    description: "Run a PowerShell command on Windows (sh on Linux), wait up to wait_timeout_ms, and return its stdout, stderr, combined output, status, and exit code. If it is still running, use the returned job_id with terminal_status instead of starting the command again. Disabled in read-only mode.",
+    description: "Run a PowerShell command on Windows (sh on Linux), wait up to wait_timeout_ms, and return its stdout, stderr, combined output, status, and exit code. If it is still running, use the returned job_id with terminal_status instead of starting the command again. A lost or uncertain response does not prove failure and does not authorize replay by command or arguments. Disabled in read-only mode.",
     inputSchema: {
       command: z.string().min(1).max(100_000),
       cwd: z.string().default("."),
@@ -838,7 +842,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("terminal_status", {
     title: "Get terminal command status",
-    description: "Poll an asynchronous direct terminal command. Output is bounded to the most recent 1,000,000 characters.",
+    description: "Poll one asynchronous direct terminal command by its exact job_id. This observes existing local work and never recreates it. Output is bounded to the most recent 1,000,000 characters.",
     inputSchema: { job_id: z.string().uuid() },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },

@@ -121,10 +121,10 @@ export class LunaStateStore {
     for (const job of Object.values(this.state.jobs)) {
       if (job.status !== "queued" && job.status !== "running") continue;
       Object.assign(job, {
-        status: "failed",
+        status: "ambiguous",
         finishedAt: now,
         terminalEvent: "runtime_restarted",
-        error: "The standalone MCP runtime restarted before this task completed; its Luna session binding was preserved",
+        error: "The standalone MCP runtime restarted while this task was queued or running. Local side effects may have occurred; the Luna session binding was preserved, but this task must not be replayed automatically.",
       });
       changed += 1;
     }

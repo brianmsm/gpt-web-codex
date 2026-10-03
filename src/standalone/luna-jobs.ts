@@ -6,7 +6,7 @@ import { createInterface } from "node:readline";
 import { buildCodexInvocation } from "./codex-command";
 import { terminateOwnedProcessTree } from "./process-tree";
 import { defaultStandaloneLogDir, LunaStateStore } from "./state-store";
-import type { LunaJob, StartLunaJobInput } from "./types";
+import type { LunaJob, RecoveryOutcome, StartLunaJobInput } from "./types";
 
 type SpawnCodex = (command: string, args: string[], cwd: string) => ChildProcessWithoutNullStreams;
 
@@ -34,6 +34,25 @@ function eventMutates(event: Record<string, unknown>): boolean {
   if (!event.item || typeof event.item !== "object") return false;
   const type = String((event.item as Record<string, unknown>).type ?? "");
   return type === "file_change" || type === "command_execution";
+}
+
+export function lunaRecoveryOutcome(job: LunaJob): RecoveryOutcome {
+  switch (job.status) {
+    case "completed":
+      return "known_completion";
+    case "queued":
+    case "running":
+      return "running_recoverable";
+    case "ambiguous":
+    case "timed_out":
+      return "ambiguous";
+    case "cancelled":
+      return job.attempts === 0 ? "known_local_failure" : "ambiguous";
+    case "failed":
+      return job.terminalEvent === "turn.failed" || job.terminalEvent === "error"
+        ? "known_local_failure"
+        : "ambiguous";
+  }
 }
 
 const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp)$/i;
@@ -144,6 +163,19 @@ export class LunaJobManager {
     return job;
   }
 
+  getForSession(jobId: string, webSessionId: string): LunaJob {
+    const job = this.store.job(jobId);
+    if (!job || job.webSessionId !== webSessionId) {
+      throw new Error(`Unknown Luna job in the current web session: ${jobId}`);
+    }
+    return job;
+  }
+
+  cancelForSession(jobId: string, webSessionId: string): LunaJob {
+    this.getForSession(jobId, webSessionId);
+    return this.cancel(jobId);
+  }
+
   cancel(jobId: string): LunaJob {
     const child = this.active.get(jobId);
     if (child && !child.killed) {
@@ -160,16 +192,9 @@ export class LunaJobManager {
 
   private async run(jobId: string): Promise<void> {
     try {
-      await this.runAttempt(jobId);
-      const first = this.get(jobId);
-      const transient = first.status === "failed"
-        && !first.mutationSeen
-        && (first.eventCount <= 2 || /ECONN|connection|stream|socket|network|transport|spawn/i.test(first.error ?? ""));
-      if (!transient) return;
-      this.store.updateJob(jobId, {
-        status: "queued", error: undefined, finishedAt: undefined, terminalEvent: undefined,
-        finalMessage: undefined, pid: undefined, exitCode: undefined,
-      });
+      // A failed/uncertain attempt is not proof that no side effect occurred.
+      // Reacquisition/status remains available for the same job, but Wave 4
+      // deliberately does not replay the prompt automatically.
       await this.runAttempt(jobId);
     } finally {
       this.prompts.delete(jobId);
