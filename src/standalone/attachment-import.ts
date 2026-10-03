@@ -16,8 +16,8 @@ const DEFAULT_ALLOWED_ATTACHMENT_HOSTS = [
   "openai.com",
   "cdn.openai.com",
   "oaistatic.com",
-  "oaisdmntprkoreacentral.blob.core.windows.net",
 ] as const;
+const OPENAI_RUNTIME_AZURE_BLOB_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\.blob\.core\.windows\.net$/;
 const MAX_REDIRECTS = 5;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
@@ -124,7 +124,9 @@ function hostAllowed(hostname: string, allowedHosts: readonly string[]): boolean
 }
 
 export function isApprovedChatGptAttachmentHost(hostname: string): boolean {
-  return hostAllowed(hostname, DEFAULT_ALLOWED_ATTACHMENT_HOSTS);
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return hostAllowed(host, DEFAULT_ALLOWED_ATTACHMENT_HOSTS)
+    || OPENAI_RUNTIME_AZURE_BLOB_HOST_PATTERN.test(host);
 }
 
 export function isAllowedProxyFakeIpForChatGptAttachment(hostname: string, address: string): boolean {
@@ -158,7 +160,10 @@ async function verifyDownloadUrl(rawUrl: string, policy: ImportNetworkPolicy = {
   if (url.username || url.password) throw new Error("Attachment download_url must not include credentials");
   const allowedHosts = policy.allowedHosts ?? DEFAULT_ALLOWED_ATTACHMENT_HOSTS;
   const productionOriginPolicy = policy.allowedHosts === undefined;
-  if (!loopbackHost && !hostAllowed(url.hostname, allowedHosts)) {
+  const approvedHost = productionOriginPolicy
+    ? isApprovedChatGptAttachmentHost(url.hostname)
+    : hostAllowed(url.hostname, allowedHosts);
+  if (!loopbackHost && !approvedHost) {
     throw new Error(`Attachment download_url host ${url.hostname} is not an approved ChatGPT file origin`);
   }
   if (loopbackHost && !policy.allowHttpLoopback) throw new Error("Attachment download_url points to a blocked host");

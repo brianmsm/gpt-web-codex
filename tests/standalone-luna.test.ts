@@ -866,6 +866,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("Do not search for, install, or use terminal image renderers such as chafa, viu, or img2txt");
     expect(client.getInstructions()).toContain("If the user explicitly asks to view an image inside their terminal, a terminal renderer is allowed");
     expect(client.getInstructions()).toContain("For HTML or PDF layout inspection, render only the relevant view or page");
+    expect(client.getInstructions()).toContain("assistant/tool-generated downloadable files");
+    expect(client.getInstructions()).toContain("do not Base64-encode or chunk a ChatGPT-managed file");
+    expect(client.getInstructions()).toContain("instead of silently falling back to Base64");
     expect(client.getInstructions()).toContain("Do not simulate an empty directory");
     expect(client.getInstructions()).toContain("Use terminal_exec for ordinary commands");
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");

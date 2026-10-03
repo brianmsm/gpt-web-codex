@@ -559,7 +559,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("file_import_attachment", {
     title: "Import a ChatGPT attachment",
-    description: "Save a file uploaded to this ChatGPT conversation into a disclosed local workspace. The file parameter must be the platform attachment object supplied through openai/fileParams; this is not a general URL downloader. Disabled in read-only mode. Downloads are size-limited, source-checked, hashed, never executed, and do not overwrite by default. After import, use file_read/file_image_preview or give the returned local path to codexluna_start.",
+    description: "Save a ChatGPT-managed file into a disclosed local workspace, including user uploads and assistant/tool-generated downloadable files. The file parameter must be the platform attachment object supplied through openai/fileParams; this is not a general URL downloader. Prefer this binary transfer path over Base64 or chunked text transport. Disabled in read-only mode. Downloads are size-limited, source-checked, hashed, never executed, and do not overwrite by default. After import, use file_read/file_image_preview or give the returned local path to codexluna_start.",
     inputSchema: {
       file: z.object({
         download_url: z.string().min(1),

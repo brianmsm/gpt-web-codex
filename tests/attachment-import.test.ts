@@ -70,15 +70,19 @@ test("attachment magic-byte detection is independent from declared MIME", () => 
   expect(detectAttachmentMimeType(Buffer.from("plain text"))).toBeNull();
 });
 
-test("production origin policy accepts only the observed OpenAI Azure blob account", () => {
+test("production origin policy accepts the narrow OpenAI runtime Azure blob account pattern", () => {
   expect(isApprovedChatGptAttachmentHost("oaisdmntprkoreacentral.blob.core.windows.net")).toBe(true);
+  expect(isApprovedChatGptAttachmentHost("oaisdmntprdenmarkeast.blob.core.windows.net")).toBe(true);
+  expect(isApprovedChatGptAttachmentHost("oaisdmntpreastus2.blob.core.windows.net")).toBe(true);
   expect(isApprovedChatGptAttachmentHost("attacker.blob.core.windows.net")).toBe(false);
-  expect(isApprovedChatGptAttachmentHost("oaisdmntprkoreacentral.blob.core.windows.net.evil.example")).toBe(false);
+  expect(isApprovedChatGptAttachmentHost("oaisdmntpr.blob.core.windows.net")).toBe(false);
+  expect(isApprovedChatGptAttachmentHost("oaisdmntpr-denmarkeast.blob.core.windows.net")).toBe(false);
+  expect(isApprovedChatGptAttachmentHost("oaisdmntprdenmarkeast.blob.core.windows.net.evil.example")).toBe(false);
 });
 
 test("proxy fake IP is accepted only for an approved ChatGPT attachment host", () => {
   expect(isAllowedProxyFakeIpForChatGptAttachment(
-    "oaisdmntprkoreacentral.blob.core.windows.net",
+    "oaisdmntprdenmarkeast.blob.core.windows.net",
     "198.18.64.130",
   )).toBe(true);
   expect(isAllowedProxyFakeIpForChatGptAttachment("attacker.example", "198.18.64.130")).toBe(false);
