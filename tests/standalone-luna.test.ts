@@ -871,6 +871,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("prefer file_edit for exact replacements and file_apply_patch");
     expect(client.getInstructions()).toContain("external MCP namespace");
     expect(client.getInstructions()).toContain("not permission to repeat it automatically");
+    expect(client.getInstructions()).toContain("Browser-control tools exposed by an external MCP");
+    expect(client.getInstructions()).toContain("require an explicit user request for browser interaction in the current conversation");
+    expect(client.getInstructions()).toContain("a previous request in another conversation is not authorization");
     expect(client.getInstructions()).toContain("last_job_id is informational only");
     expect(client.getInstructions()).toContain("exact job_id returned by that start");
     expect(client.getInstructions()).toContain("openai/session metadata, that metadata is the authoritative web-session identity");
