@@ -93,7 +93,7 @@ function optionalConversationSessionId(
   return explicitSessionId;
 }
 
-function conversationSessionId(
+export function conversationSessionId(
   explicit: string | undefined,
   meta: Record<string, unknown> | undefined,
   allowCreate: boolean,
@@ -122,11 +122,12 @@ function publicBinding(binding: LunaSessionBinding | undefined) {
 }
 
 function publicTerminal(job: {
-  id: string; command: string; cwd: string; status: string; pid?: number; exitCode?: number | null;
+  id: string; webSessionId: string; command: string; cwd: string; status: string; pid?: number; exitCode?: number | null;
   output: string; stdout: string; stderr: string; outputTruncated: boolean;
   startedAt: string; finishedAt?: string;
 }) {
   return {
+    web_session_id: job.webSessionId,
     job_id: job.id,
     command: job.command,
     cwd: job.cwd,
@@ -143,7 +144,7 @@ function publicTerminal(job: {
 }
 
 const terminalOutputSchema = {
-  job_id: z.string().uuid(), command: z.string(), cwd: z.string(),
+  web_session_id: sessionId, job_id: z.string().uuid(), command: z.string(), cwd: z.string(),
   status: z.enum(["running", "completed", "failed", "cancelled"]),
   pid: z.number().int().nullable(), exit_code: z.number().int().nullable(), output: z.string(),
   stdout: z.string(), stderr: z.string(), output_truncated: z.boolean(),
@@ -301,7 +302,7 @@ export async function runChatGptMcpServer(options: {
     void shutdownServices();
   };
 
-  registerHerdrTools(server, herdr);
+  registerHerdrTools(server, herdr, jobs.store, conversationSessionId);
 
   const registerImagePreviewResource = (name: string, uri: string) => {
     server.registerResource(name, uri, {
@@ -788,17 +789,21 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("terminal_start", {
     title: "Start a local terminal command",
-    description: "Start an asynchronous PowerShell command on Windows (sh on Linux). If the response containing job_id is lost, there is no safe lookup by command or arguments; do not resubmit automatically. Direct terminal execution is disabled in read-only mode.",
-    inputSchema: { command: z.string().min(1).max(100_000), cwd: z.string().default("."), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write") },
+    description: "Start an asynchronous PowerShell command on Windows (sh on Linux) owned by the current web session. If the response containing job_id is lost, there is no safe lookup by command or arguments; do not resubmit automatically. Direct terminal execution is disabled in read-only mode.",
+    inputSchema: { web_session_id: sessionId.optional(), command: z.string().min(1).max(100_000), cwd: z.string().default("."), workspace_path: z.string().min(1), permission_mode: sandbox.default("workspace-write") },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     _meta: { securitySchemes: noAuth },
-  }, async input => result(publicTerminal(direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode))));
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, true);
+    return result(publicTerminal(direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode, webSessionId)));
+  });
 
   server.registerTool("terminal_exec", {
     title: "Run a local terminal command and read its output",
     description: "Run a PowerShell command on Windows (sh on Linux), wait up to wait_timeout_ms, and return its stdout, stderr, combined output, status, and exit code. If it is still running, use the returned job_id with terminal_status instead of starting the command again. A lost or uncertain response does not prove failure and does not authorize replay by command or arguments. Disabled in read-only mode.",
     inputSchema: {
+      web_session_id: sessionId.optional(),
       command: z.string().min(1).max(100_000),
       cwd: z.string().default("."),
       workspace_path: z.string().min(1),
@@ -809,6 +814,7 @@ export async function runChatGptMcpServer(options: {
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     _meta: { securitySchemes: noAuth },
   }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, true);
     const traceIdentity = terminalExecTraceIdentity(input);
     const boundaryDispatchId = mcpTraceDispatchId(extra._meta);
     const lifecycleBase = {
@@ -822,7 +828,7 @@ export async function runChatGptMcpServer(options: {
     requestTrace.recordLifecycle({ event_type: "request_received", ...lifecycleBase });
     requestTrace.recordTerminalExec("received", extra.requestId, traceIdentity, undefined, boundaryDispatchId);
 
-    const started = direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode);
+    const started = direct.startTerminal(input.command, input.cwd, input.workspace_path, input.permission_mode, webSessionId);
     requestTrace.recordLifecycle({
       event_type: "execution_started",
       ...lifecycleBase,
@@ -833,7 +839,7 @@ export async function runChatGptMcpServer(options: {
     });
     requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started, boundaryDispatchId);
 
-    const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms);
+    const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms, webSessionId);
     if (completed.status !== "running") {
       requestTrace.recordLifecycle({
         event_type: "execution_finished",
@@ -852,30 +858,39 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("terminal_status", {
     title: "Get terminal command status",
-    description: "Poll one asynchronous direct terminal command by its exact job_id. This observes existing local work and never recreates it. Output is bounded to the most recent 1,000,000 characters.",
-    inputSchema: { job_id: z.string().uuid() },
+    description: "Poll one asynchronous direct terminal command by its exact job_id, but only when it is owned by the current web session. This observes existing local work and never recreates it. Output is bounded to the most recent 1,000,000 characters.",
+    inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: noAuth },
-  }, async ({ job_id }) => result(publicTerminal(direct.terminal(job_id))));
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, false);
+    return result(publicTerminal(direct.terminal(input.job_id, webSessionId)));
+  });
 
   server.registerTool("terminal_write_stdin", {
     title: "Write to a running terminal command",
-    description: "Send UTF-8 input to an owned running terminal job. Set close=true to close stdin after the input, then use terminal_status to read subsequent output and completion.",
-    inputSchema: { job_id: z.string().uuid(), input: z.string().max(100_000).default(""), close: z.boolean().default(false) },
+    description: "Send UTF-8 input to a running terminal job owned by the current web session. Set close=true to close stdin after the input, then use terminal_status to read subsequent output and completion.",
+    inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid(), input: z.string().max(100_000).default(""), close: z.boolean().default(false) },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     _meta: { securitySchemes: noAuth },
-  }, async ({ job_id, input, close }) => result(publicTerminal(direct.writeTerminalStdin(job_id, input, close))));
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, false);
+    return result(publicTerminal(direct.writeTerminalStdin(input.job_id, input.input, input.close, webSessionId)));
+  });
 
   server.registerTool("terminal_cancel", {
     title: "Cancel terminal command",
-    description: "Cancel an owned direct terminal process.",
-    inputSchema: { job_id: z.string().uuid() },
+    description: "Cancel a direct terminal process only when it is owned by the current web session.",
+    inputSchema: { web_session_id: sessionId.optional(), job_id: z.string().uuid() },
     outputSchema: terminalOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: noAuth },
-  }, async ({ job_id }) => result(publicTerminal(direct.cancelTerminal(job_id))));
+  }, async (input, extra) => {
+    const webSessionId = conversationSessionId(input.web_session_id, extra._meta, false);
+    return result(publicTerminal(direct.cancelTerminal(input.job_id, webSessionId)));
+  });
 
   try {
     externalMcp = await ExternalMcpBridge.initialize({ configPath: options.externalMcpConfigPath });

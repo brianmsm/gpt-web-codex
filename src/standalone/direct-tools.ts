@@ -58,6 +58,7 @@ function imageMimeType(bytes: Buffer): DirectImageFileRead["mimeType"] | null {
 
 interface TerminalJob {
   id: string;
+  webSessionId: string;
   command: string;
   cwd: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -883,7 +884,7 @@ export class DirectToolService {
     return { path: target, deleted: true, recursive };
   }
 
-  startTerminal(command: string, cwd: string, workspace: string, mode: LunaSandbox): Omit<TerminalJob, "child"> {
+  startTerminal(command: string, cwd: string, workspace: string, mode: LunaSandbox, webSessionId = "direct:unscoped"): Omit<TerminalJob, "child"> {
     if (mode === "read-only") throw new Error("Terminal execution is disabled in read-only mode");
     const resolvedCwd = resolveScopedPath(cwd, workspace, mode);
     const id = randomUUID();
@@ -904,7 +905,7 @@ export class DirectToolService {
       : ["-lc", command];
     const child = spawn(shell, args, { cwd: resolvedCwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const job: TerminalJob = {
-      id, command, cwd: resolvedCwd, status: "running", pid: child.pid,
+      id, webSessionId, command, cwd: resolvedCwd, status: "running", pid: child.pid,
       output: "", stdout: "", stderr: "", outputTruncated: false,
       startedAt: new Date().toISOString(), child,
     };
@@ -933,15 +934,12 @@ export class DirectToolService {
     return this.publicTerminal(job);
   }
 
-  terminal(jobId: string): Omit<TerminalJob, "child"> {
-    const job = this.terminals.get(jobId);
-    if (!job) throw new Error(`Unknown terminal job: ${jobId}`);
-    return this.publicTerminal(job);
+  terminal(jobId: string, webSessionId?: string): Omit<TerminalJob, "child"> {
+    return this.publicTerminal(this.requireTerminal(jobId, webSessionId));
   }
 
-  async waitTerminal(jobId: string, waitMs = 60_000): Promise<Omit<TerminalJob, "child">> {
-    const job = this.terminals.get(jobId);
-    if (!job) throw new Error(`Unknown terminal job: ${jobId}`);
+  async waitTerminal(jobId: string, waitMs = 60_000, webSessionId?: string): Promise<Omit<TerminalJob, "child">> {
+    const job = this.requireTerminal(jobId, webSessionId);
     if (job.status !== "running" || !job.child || waitMs <= 0) return this.publicTerminal(job);
     await new Promise<void>(resolveWait => {
       const child = job.child!;
@@ -959,9 +957,8 @@ export class DirectToolService {
     return this.publicTerminal(job);
   }
 
-  writeTerminalStdin(jobId: string, input: string, close = false): Omit<TerminalJob, "child"> {
-    const job = this.terminals.get(jobId);
-    if (!job) throw new Error(`Unknown terminal job: ${jobId}`);
+  writeTerminalStdin(jobId: string, input: string, close = false, webSessionId?: string): Omit<TerminalJob, "child"> {
+    const job = this.requireTerminal(jobId, webSessionId);
     if (job.status !== "running" || !job.child) throw new Error(`Terminal job is not running: ${jobId}`);
     if (job.child.stdin.destroyed || job.child.stdin.writableEnded) throw new Error(`Terminal stdin is closed: ${jobId}`);
     if (input) job.child.stdin.write(input, "utf8");
@@ -969,9 +966,8 @@ export class DirectToolService {
     return this.publicTerminal(job);
   }
 
-  cancelTerminal(jobId: string): Omit<TerminalJob, "child"> {
-    const job = this.terminals.get(jobId);
-    if (!job) throw new Error(`Unknown terminal job: ${jobId}`);
+  cancelTerminal(jobId: string, webSessionId?: string): Omit<TerminalJob, "child"> {
+    const job = this.requireTerminal(jobId, webSessionId);
     if (job.status === "running") {
       job.status = "cancelled";
       job.finishedAt = new Date().toISOString();
@@ -982,6 +978,14 @@ export class DirectToolService {
       }
     }
     return this.publicTerminal(job);
+  }
+
+  private requireTerminal(jobId: string, webSessionId?: string): TerminalJob {
+    const job = this.terminals.get(jobId);
+    if (!job || (webSessionId !== undefined && job.webSessionId !== webSessionId)) {
+      throw new Error(`Unknown terminal job in the current web session: ${jobId}`);
+    }
+    return job;
   }
 
   private publicTerminal({ child: _child, ...job }: TerminalJob): Omit<TerminalJob, "child"> {

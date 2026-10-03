@@ -22,7 +22,7 @@ export function defaultStandaloneLogDir(statePath = defaultStandaloneStatePath()
 }
 
 function emptyState(): LunaState {
-  return { version: 1, sessions: {}, jobs: {} };
+  return { version: 1, sessions: {}, jobs: {}, herdrOwnership: { workspaces: {}, panes: {} } };
 }
 
 function assertRecord(value: unknown, name: string): asserts value is Record<string, unknown> {
@@ -45,6 +45,21 @@ export class LunaStateStore {
     if (parsed.version !== 1) throw new Error(`Unsupported standalone state version in ${this.path}`);
     assertRecord(parsed.sessions, "standalone sessions");
     assertRecord(parsed.jobs, "standalone jobs");
+    if (parsed.herdrOwnership === undefined) {
+      parsed.herdrOwnership = { workspaces: {}, panes: {} };
+    }
+    assertRecord(parsed.herdrOwnership, "Herdr ownership state");
+    const ownership = parsed.herdrOwnership as Record<string, unknown>;
+    if (ownership.workspaces === undefined) ownership.workspaces = {};
+    if (ownership.panes === undefined) ownership.panes = {};
+    assertRecord(ownership.workspaces, "Herdr workspace ownership");
+    assertRecord(ownership.panes, "Herdr pane ownership");
+    for (const [sessionName, value] of Object.entries(ownership.workspaces)) {
+      assertRecord(value, `Herdr workspace ownership for session ${sessionName}`);
+    }
+    for (const [sessionName, value] of Object.entries(ownership.panes)) {
+      assertRecord(value, `Herdr pane ownership for session ${sessionName}`);
+    }
     return parsed as unknown as LunaState;
   }
 
@@ -77,6 +92,28 @@ export class LunaStateStore {
     const binding = this.ensureBinding(webSessionId);
     binding.lunaSessionId = lunaSessionId;
     binding.updatedAt = new Date().toISOString();
+    this.save();
+  }
+
+  herdrWorkspaceOwner(sessionName: string, workspaceId: string): string | undefined {
+    return this.state.herdrOwnership.workspaces[sessionName]?.[workspaceId];
+  }
+
+  herdrPaneOwner(sessionName: string, paneId: string): string | undefined {
+    return this.state.herdrOwnership.panes[sessionName]?.[paneId];
+  }
+
+  bindHerdrWorkspace(webSessionId: string, sessionName: string, workspaceId: string): void {
+    const bySession = this.state.herdrOwnership.workspaces[sessionName] ??= {};
+    bySession[workspaceId] = webSessionId;
+    this.ensureBinding(webSessionId);
+    this.save();
+  }
+
+  bindHerdrPane(webSessionId: string, sessionName: string, paneId: string): void {
+    const bySession = this.state.herdrOwnership.panes[sessionName] ??= {};
+    bySession[paneId] = webSessionId;
+    this.ensureBinding(webSessionId);
     this.save();
   }
 

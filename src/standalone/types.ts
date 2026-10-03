@@ -55,10 +55,16 @@ export interface LunaJob {
   logPath: string;
 }
 
+export interface HerdrOwnershipState {
+  workspaces: Record<string, Record<string, string>>;
+  panes: Record<string, Record<string, string>>;
+}
+
 export interface LunaState {
   version: 1;
   sessions: Record<string, LunaSessionBinding>;
   jobs: Record<string, LunaJob>;
+  herdrOwnership: HerdrOwnershipState;
 }
 
 export interface StartLunaJobInput {

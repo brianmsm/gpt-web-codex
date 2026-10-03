@@ -755,6 +755,92 @@ test("equivalent terminal starts remain independent local jobs", async () => {
   }
 });
 
+test("direct terminal jobs are isolated by authoritative web session ownership", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-terminal-session-owner-"));
+  const statePath = join(root, "state.json");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["src/cli.ts", "mcp", "--state-path", statePath],
+    cwd: process.cwd(),
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "webgpt-terminal-session-test", version: "1.0.0" });
+  const sessionA = "terminal-owner-a";
+  const sessionB = "terminal-owner-b";
+  try {
+    await client.connect(transport);
+    const command = process.platform === "win32"
+      ? "$line = [Console]::In.ReadLine(); Write-Output \"INPUT:$line\""
+      : "read line; printf 'INPUT:%s\\n' \"$line\"";
+    const started = await client.callTool({
+      name: "terminal_start",
+      arguments: { command, cwd: ".", workspace_path: root, permission_mode: "workspace-write" },
+      _meta: { "openai/session": sessionA },
+    });
+    expect(started.isError).not.toBe(true);
+    const startedContent = started.structuredContent as { web_session_id: string; job_id: string; status: string };
+    expect(startedContent.web_session_id).toBe(canonicalWebSessionId(sessionA));
+    expect(startedContent.status).toBe("running");
+
+    const crossStatus = await client.callTool({
+      name: "terminal_status", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionB },
+    });
+    expect(crossStatus.isError).toBe(true);
+    expect(JSON.stringify(crossStatus.content)).toContain("current web session");
+
+    const crossStdin = await client.callTool({
+      name: "terminal_write_stdin",
+      arguments: { job_id: startedContent.job_id, input: "intrusion\\n", close: true },
+      _meta: { "openai/session": sessionB },
+    });
+    expect(crossStdin.isError).toBe(true);
+    expect(JSON.stringify(crossStdin.content)).toContain("current web session");
+
+    const crossCancel = await client.callTool({
+      name: "terminal_cancel", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionB },
+    });
+    expect(crossCancel.isError).toBe(true);
+    expect(JSON.stringify(crossCancel.content)).toContain("current web session");
+
+    const ownerStatus = await client.callTool({
+      name: "terminal_status", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionA },
+    });
+    expect(ownerStatus.isError).not.toBe(true);
+    expect(ownerStatus.structuredContent).toMatchObject({
+      web_session_id: canonicalWebSessionId(sessionA), job_id: startedContent.job_id, status: "running",
+    });
+
+    const ownerWrite = await client.callTool({
+      name: "terminal_write_stdin",
+      arguments: { job_id: startedContent.job_id, input: "owner\\n", close: true },
+      _meta: { "openai/session": sessionA },
+    });
+    expect(ownerWrite.isError).not.toBe(true);
+    let final = ownerStatus;
+    for (let i = 0; i < 100; i += 1) {
+      final = await client.callTool({
+        name: "terminal_status", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionA },
+      });
+      if ((final.structuredContent as { status?: string }).status !== "running") break;
+      await Bun.sleep(10);
+    }
+    expect(final.isError).not.toBe(true);
+    expect(final.structuredContent).toMatchObject({ status: "completed" });
+    expect((final.structuredContent as { stdout: string }).stdout).toContain("INPUT:owner");
+
+    const mismatchedExplicit = await client.callTool({
+      name: "terminal_status",
+      arguments: { web_session_id: canonicalWebSessionId(sessionA), job_id: startedContent.job_id },
+      _meta: { "openai/session": sessionB },
+    });
+    expect(mismatchedExplicit.isError).toBe(true);
+    expect(JSON.stringify(mismatchedExplicit.content)).toContain("authoritative ChatGPT openai/session metadata");
+  } finally {
+    await client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("standalone MCP exposes Luna direct and Herdr tools without a turn broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-"));
   const transport = new StdioClientTransport({
