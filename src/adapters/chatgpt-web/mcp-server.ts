@@ -36,7 +36,7 @@ import { VERSION } from "../../version";
 const sessionId = z.string().min(8).max(256);
 const sandbox = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const reasoning = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
-const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out", "cancelled", "ambiguous"]);
+const jobStatus = z.enum(["queued", "running", "completed", "failed", "timed_out", "cancelled"]);
 const recoveryOutcome = z.enum(["known_completion", "known_local_failure", "running_recoverable", "ambiguous"]);
 const compactPolicySchema = z.string();
 const noAuth = [{ type: "noauth" as const }];

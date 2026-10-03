@@ -40,7 +40,7 @@ Wave 4 adds the internal/public Luna recovery classification:
 - `running_recoverable`: the same known local job is queued/running and can be observed by its existing identity.
 - `ambiguous`: GWC lacks enough evidence to say that the operation did not occur or to say that repeating it is the same logical operation. Local side effects may already have occurred. `ambiguous` is neither success nor automatic failure and never means retryable or safe to replay.
 
-`timed_out` is classified as `ambiguous`. A persisted Luna job found `queued` or `running` after GWC restart is changed to status `ambiguous` with terminal event `runtime_restarted`.
+`timed_out` is classified as `ambiguous`. A persisted Luna job found `queued` or `running` after GWC restart keeps the version-1-compatible persisted/public status vocabulary by becoming `failed` with terminal event `runtime_restarted`; the newer runtime derives `recovery_outcome=ambiguous` from that terminal event. This preserves rollback compatibility with herdr.3 while still exposing uncertainty explicitly.
 
 ## Implemented changes
 
@@ -111,14 +111,14 @@ Wave 4 preserves request-instance semantics:
 | --- | --- | --- | --- | --- |
 | Tunnel reconnect, same GWC process | Known job remains observable | Known job remains observable only to its owning web session | Pane remains daemon-owned and the GWC ownership binding remains session-scoped | Existing bridge process/session remains subject to its own connection lifecycle; no operation replay |
 | GWC graceful shutdown | Active Luna child is terminated; persisted incomplete job becomes ambiguous on next startup | Active terminal child is terminated; in-memory handle is lost | Herdr pane is intentionally not terminated | Owned external MCP stdio connections/processes are closed |
-| GWC crash/restart | Persisted queued/running job becomes `ambiguous`; binding may survive, execution is not resumed/replayed | No durable recovery promise; handle/process ownership is in-memory | Herdr daemon/pane can survive independently; persisted GWC workspace/pane ownership lets only the same web session reacquire an explicit ID | No generic in-flight result reacquisition or replay promise |
+| GWC crash/restart | Persisted queued/running job becomes legacy-compatible `failed` plus `terminal_event=runtime_restarted`, which the new runtime exposes as `recovery_outcome=ambiguous`; binding may survive, execution is not resumed/replayed | No durable recovery promise; handle/process ownership is in-memory | Herdr daemon/pane can survive independently; persisted GWC workspace/pane ownership lets only the same web session reacquire an explicit ID | No generic in-flight result reacquisition or replay promise |
 | Different web session | Job/status/cancel access is rejected | Terminal status/stdin/cancel are rejected even with a known UUID | Bound Herdr workspace/pane access and cwd-based adoption are rejected; daemon-level `herdr_status` grants no binding | No GWC cross-request idempotency layer is imposed |
 
 Wave 4 does not promise that process crash and graceful shutdown have identical OS-level cleanup timing. It only defines what GWC may safely claim and replay after restart.
 
 ## Public schema changes
 
-- Luna job status now includes `ambiguous`.
+- Luna job status keeps the pre-Wave-4 version-1 vocabulary; ambiguity is exposed separately through `recovery_outcome=ambiguous`.
 - `codexluna_status` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
 - `codexluna_cancel` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
 - Tool descriptions/instructions document same-session reacquisition and no-replay boundaries.
@@ -130,7 +130,7 @@ No terminal, Herdr, or external-MCP result schema was expanded with speculative 
 ## Tests added or strengthened
 
 - A transient-looking Luna failure with an actual side effect but no observed mutation event executes exactly once (`attempts === 1`).
-- Interrupted persisted Luna work becomes public `ambiguous`, not false `failed`.
+- Interrupted persisted Luna work retains the backward-compatible `failed` status but is publicly classified as `recovery_outcome=ambiguous` with `terminal_event=runtime_restarted`, so callers must not interpret that legacy status as a known local failure.
 - Luna status rejects a job from another web session and another session does not inherit `last_job_id`.
 - Metadata session B plus explicit `web_session_id` A is rejected uniformly by `init`, `start`, `status`, `cancel`, and `session`; matching metadata+explicit identity and metadata-only lookup remain valid.
 - `last_job_id` is proven unsafe for A-specific recovery when A is followed by same-payload B; exact `job_id` still recovers A.

@@ -43,7 +43,6 @@ export function lunaRecoveryOutcome(job: LunaJob): RecoveryOutcome {
     case "queued":
     case "running":
       return "running_recoverable";
-    case "ambiguous":
     case "timed_out":
       return "ambiguous";
     case "cancelled":

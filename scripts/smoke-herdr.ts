@@ -54,7 +54,8 @@ const statePath = join(root, "mcp-state.json");
 const sourceRepo = join(root, "source");
 const worktreePath = join(root, "worker");
 const branch = `gwc-herdr-smoke-${process.pid}`;
-const herdrAccess = { workspace_path: root, permission_mode: "workspace-write" };
+const webSessionId = `webgpt:herdr-smoke-${process.pid}`;
+const herdrAccess = { web_session_id: webSessionId, workspace_path: root, permission_mode: "workspace-write" };
 const keySinkPath = join(root, "key-sink.mjs");
 const keySinkMarker = "GWC_HERDR_KEYS_DONE";
 mkdirSync(sourceRepo);
@@ -253,6 +254,7 @@ try {
   const receipt = {
     ok: true,
     session,
+    web_session_id: webSessionId,
     herdr_version: selectedHealth.version ?? null,
     source_repo: sourceRepo,
     worktree_path: worktreePath,

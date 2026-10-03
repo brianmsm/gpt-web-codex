@@ -316,10 +316,14 @@ test("failed, timed-out, and interrupted jobs preserve their Luna binding", asyn
     const interrupted = { ...sampleJob(root), id: "interrupted-job", webSessionId, status: "running" as const };
     interruptedStore.putJob(interrupted);
     const recovered = new LunaJobManager(interruptedStore, undefined, join(root, "logs-recovered"));
-    expect(recovered.get(interrupted.id).status).toBe("ambiguous");
+    expect(recovered.get(interrupted.id).status).toBe("failed");
     expect(recovered.get(interrupted.id).terminalEvent).toBe("runtime_restarted");
     expect(recovered.get(interrupted.id).error).toContain("Local side effects may have occurred");
     expect(lunaRecoveryOutcome(recovered.get(interrupted.id))).toBe("ambiguous");
+    const persisted = JSON.parse(readFileSync(statePath, "utf8")) as { version: number; jobs: Record<string, { status: string; terminalEvent?: string }> };
+    expect(persisted.version).toBe(1);
+    expect(["queued", "running", "completed", "failed", "timed_out", "cancelled"]).toContain(persisted.jobs[interrupted.id]?.status);
+    expect(persisted.jobs[interrupted.id]).toMatchObject({ status: "failed", terminalEvent: "runtime_restarted" });
     expect(recovered.store.binding(webSessionId)?.lunaSessionId).toBe("luna-thread-survives");
     recovered.shutdown();
   } finally {
@@ -375,7 +379,7 @@ test("Luna reacquisition is session-scoped and restart ambiguity is public", asy
     });
     expect(sameSession.isError).not.toBe(true);
     expect(sameSession.structuredContent).toMatchObject({
-      web_session_id: sessionA, job_id: jobId, status: "ambiguous", recovery_outcome: "ambiguous",
+      web_session_id: sessionA, job_id: jobId, status: "failed", recovery_outcome: "ambiguous",
     });
     expect(JSON.stringify(sameSession.structuredContent)).toContain("Local side effects may have occurred");
 
@@ -487,7 +491,7 @@ test("openai/session is authoritative over explicit web_session_id across Luna r
     });
     expect(stillOwnedByA.isError).not.toBe(true);
     expect(stillOwnedByA.structuredContent).toMatchObject({
-      web_session_id: sessionA, job_id: jobId, status: "ambiguous", recovery_outcome: "ambiguous",
+      web_session_id: sessionA, job_id: jobId, status: "failed", recovery_outcome: "ambiguous",
     });
   } finally {
     await client.close();

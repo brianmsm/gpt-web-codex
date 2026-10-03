@@ -158,7 +158,9 @@ export class LunaStateStore {
     for (const job of Object.values(this.state.jobs)) {
       if (job.status !== "queued" && job.status !== "running") continue;
       Object.assign(job, {
-        status: "ambiguous",
+        // Keep the persisted v1 status vocabulary backward-compatible with herdr.3.
+        // terminalEvent carries the restart uncertainty; newer runtimes expose it as recovery_outcome=ambiguous.
+        status: "failed",
         finishedAt: now,
         terminalEvent: "runtime_restarted",
         error: "The standalone MCP runtime restarted while this task was queued or running. Local side effects may have occurred; the Luna session binding was preserved, but this task must not be replayed automatically.",
