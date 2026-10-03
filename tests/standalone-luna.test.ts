@@ -856,7 +856,10 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
   const client = new Client({ name: "webgpt-standalone-test", version: "1.0.0" });
   try {
     await client.connect(transport);
-    expect(client.getInstructions()).toContain("Use codexluna_init before the first codexluna_start");
+    expect(client.getInstructions()).toContain("Codex Luna is explicit opt-in delegation, not a default execution path");
+    expect(client.getInstructions()).toContain("Do not invoke codexluna_init or codexluna_start proactively");
+    expect(client.getInstructions()).toContain("Do not fall back to Luna merely because a task is complex, long-running, browser-related");
+    expect(client.getInstructions()).toContain("When Luna delegation has been explicitly authorized, use codexluna_init before the first codexluna_start");
     expect(client.getInstructions()).toContain("Do not proactively write, update, merge, synchronize, or migrate this conversation's content");
     expect(client.getInstructions()).toContain("Do not require a confirmation keyword");
     expect(client.getInstructions()).toContain("automatically call file_image_preview exactly once");
@@ -916,6 +919,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(fileImagePreviewTool?.description).toContain("Presentation tool");
     expect(fileImagePreviewTool?.description).toContain("Prefer file_read for model-only visual inspection");
     expect(listedTools.map(tool => JSON.stringify(tool._meta ?? {})).join("\n")).not.toMatch(/[\u3400-\u9fff]/);
+    expect(listedTools.find(tool => tool.name === "codexluna_init")?.description).toContain("Explicit opt-in delegation setup");
+    expect(listedTools.find(tool => tool.name === "codexluna_start")?.description).toContain("Explicit opt-in delegation tool");
+    expect(listedTools.find(tool => tool.name === "codexluna_start")?.description).toContain("Do not call proactively");
     expect(listedTools.find(tool => tool.name === "codexluna_status")?._meta).toMatchObject({
       "openai/toolInvocation/invoking": "Checking Luna task",
       "openai/toolInvocation/invoked": "Luna task status updated",

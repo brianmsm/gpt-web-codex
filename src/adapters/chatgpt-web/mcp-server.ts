@@ -336,8 +336,8 @@ export async function runChatGptMcpServer(options: {
   });
 
   server.registerTool("codexluna_init", {
-    title: "Initialize this ChatGPT conversation",
-    description: "Initialize or restore the GPT Web Codex binding for this ChatGPT conversation before its first Luna task. Omit web_session_id to use ChatGPT's stable conversation metadata when available, with a generated conversation-scoped fallback. Reuse the returned ID only in this conversation. Visibly summarize the returned workspace, permission, and memory boundary without asking for an ACK.",
+    title: "Initialize Luna delegation (explicit opt-in)",
+    description: "Explicit opt-in delegation setup. Do not call proactively. Use this only after the user explicitly asks to use Luna/Codex, or explicitly approves Luna delegation after direct GWC tools and Herdr are insufficient. Initialize or restore the GPT Web Codex binding for this ChatGPT conversation before its first authorized Luna task. Omit web_session_id to use ChatGPT's stable conversation metadata when available, with a generated conversation-scoped fallback. Reuse the returned ID only in this conversation. Visibly summarize the returned workspace, permission, and memory boundary without asking for an ACK.",
     inputSchema: {
       web_session_id: sessionId.optional(),
       workspace_path: z.string().min(1).max(16_384),
@@ -393,8 +393,8 @@ export async function runChatGptMcpServer(options: {
   });
 
   server.registerTool("codexluna_start", {
-    title: "Start Luna execution",
-    description: "Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. Recovery of a specific start requires that start's exact job_id. codexluna_session.last_job_id reports only the most recently created job and cannot identify a specific start after another start may have occurred, even with identical inputs. Omit web_session_id to use authoritative ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
+    title: "Start Luna execution (explicit opt-in)",
+    description: "Explicit opt-in delegation tool. Do not call proactively or as a fallback merely because a task is complex, long-running, browser-related, or missing a direct tool. Call only when the user explicitly asked to use Luna/Codex, or explicitly approved Luna delegation after direct GWC tools and Herdr were found insufficient. Start an asynchronous Codex Luna task after codexluna_init. Tasks in one conversation run serially and reuse its durable Luna session, including after a prior task completed, failed, timed out, or was cancelled. Recovery of a specific start requires that start's exact job_id. codexluna_session.last_job_id reports only the most recently created job and cannot identify a specific start after another start may have occurred, even with identical inputs. Omit web_session_id to use authoritative ChatGPT conversation metadata when available. Omitted execution settings inherit the initialized binding.",
     inputSchema: {
       web_session_id: sessionId.optional(),
       prompt: z.string().min(1).max(1_000_000),
