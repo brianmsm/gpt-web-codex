@@ -1,5 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { cpSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -37,6 +37,10 @@ try {
     command: executable,
     args: [entrypoint, "mcp", "--state-path", join(root, "standalone-state.json")],
     cwd: runtimeRoot,
+    env: {
+      ...getDefaultEnvironment(),
+      CODEX_CHATGPT_WEB_EXTERNAL_MCP_CONFIG: join(root, "no-external-mcp.json"),
+    },
     stderr: "pipe",
   });
   const client = new Client({ name: "gpt-web-codex-release-smoke", version: VERSION });
