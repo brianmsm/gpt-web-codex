@@ -19,13 +19,13 @@ On GWC restart, persisted `queued` or `running` Luna jobs were converted to `fai
 
 ### Direct terminal jobs
 
-`terminal_start` and `terminal_exec` create one in-memory `TerminalJob` with a random local job ID. `terminal_status`, stdin, and cancellation address that exact job. No code retries or recreates a command after timeout/result uncertainty, and equivalent command payloads are not deduplicated.
+`terminal_start` and `terminal_exec` create one in-memory `TerminalJob` with a random local job ID and the authoritative current `web_session_id`. `terminal_status`, stdin, and cancellation require both the exact job ID and the same web-session owner. A UUID from another conversation cannot observe, write to, or cancel the job. No code retries or recreates a command after timeout/result uncertainty, and equivalent command payloads are not deduplicated.
 
 The limitation is intentional: if the response containing `job_id` is lost, there is no safe command/args-based lookup. Direct terminal jobs are in GWC memory and are terminated by graceful GWC shutdown, so they are not durable across GWC restart.
 
 ### Herdr
 
-Herdr panes are daemon-owned and can outlive GWC. `herdr_pane_run` sends one command to one explicit pane. Observation uses the same pane identity through read, status, and wait. There was no automatic command resend path.
+Herdr panes are daemon-owned and can outlive GWC. GWC now persists a separate web-session ownership binding for Herdr workspace and pane IDs. An existing unowned workspace may be adopted by the current web session, but once bound it cannot be rediscovered by another conversation through matching `cwd` or accessed by explicit pane ID. Pre-ownership version-1 state is loaded with empty ownership maps rather than guessing a historical owner from `cwd`; the first later adoption establishes the durable binding. `danger-full-access` changes filesystem scoping only and does not bypass web-session ownership. `herdr_pane_run` sends one command to one explicit owned pane; observation uses the same owned pane identity through read, status, and wait. `herdr_status` remains daemon-level health discovery and does not expose or grant workspace/pane ownership.
 
 ### External MCP
 
@@ -68,11 +68,11 @@ If `turn.completed` was already observed before cancellation was requested, the 
 
 ### Terminal recovery
 
-No execution mechanism changed because the existing behavior already satisfies the Wave 3 contract: once a job ID is known, recovery polls that exact job and never reconstructs it from command payload. Tool descriptions and MCP instructions now explicitly state the lost-handle limitation and prohibit automatic command/args replay.
+Direct-terminal execution remains one process per start, but recovery is now scoped to its authoritative web-session owner. Once a job ID is known, only that same web session may poll, write stdin, or cancel it; another session receives an ownership-scoped unknown-job error. Recovery still never reconstructs a job from command payload, and the lost-handle limitation remains unchanged.
 
 ### Herdr recovery
 
-No execution mechanism changed. The public contract now explicitly states that ACK/result uncertainty after `herdr_pane_run` is not permission to resend. Recovery preserves pane identity and uses read/status/wait against the same pane.
+Herdr execution still does not resend commands automatically. GWC now persists workspace/pane ownership in standalone state so the same web session can reacquire an explicitly known pane after GWC restart, while a different web session cannot adopt the workspace by `cwd` or use the pane ID. Recovery preserves both pane identity and web-session ownership and uses read/status/wait against that same binding.
 
 ### External MCP
 
@@ -109,10 +109,10 @@ Wave 4 preserves request-instance semantics:
 
 | Boundary | Luna | Direct terminal | Herdr | External MCP |
 | --- | --- | --- | --- | --- |
-| Tunnel reconnect, same GWC process | Known job remains observable | Known job remains observable | Pane remains daemon-owned | Existing bridge process/session remains subject to its own connection lifecycle; no operation replay |
+| Tunnel reconnect, same GWC process | Known job remains observable | Known job remains observable only to its owning web session | Pane remains daemon-owned and the GWC ownership binding remains session-scoped | Existing bridge process/session remains subject to its own connection lifecycle; no operation replay |
 | GWC graceful shutdown | Active Luna child is terminated; persisted incomplete job becomes ambiguous on next startup | Active terminal child is terminated; in-memory handle is lost | Herdr pane is intentionally not terminated | Owned external MCP stdio connections/processes are closed |
-| GWC crash/restart | Persisted queued/running job becomes `ambiguous`; binding may survive, execution is not resumed/replayed | No durable recovery promise; handle/process ownership is in-memory | Herdr daemon/pane can survive independently | No generic in-flight result reacquisition or replay promise |
-| Different web session | Job/status/cancel access is rejected | No cross-session logical-operation mechanism exists | Explicit Herdr identity/scope rules apply | No GWC cross-request idempotency layer is imposed |
+| GWC crash/restart | Persisted queued/running job becomes `ambiguous`; binding may survive, execution is not resumed/replayed | No durable recovery promise; handle/process ownership is in-memory | Herdr daemon/pane can survive independently; persisted GWC workspace/pane ownership lets only the same web session reacquire an explicit ID | No generic in-flight result reacquisition or replay promise |
+| Different web session | Job/status/cancel access is rejected | Terminal status/stdin/cancel are rejected even with a known UUID | Bound Herdr workspace/pane access and cwd-based adoption are rejected; daemon-level `herdr_status` grants no binding | No GWC cross-request idempotency layer is imposed |
 
 Wave 4 does not promise that process crash and graceful shutdown have identical OS-level cleanup timing. It only defines what GWC may safely claim and replay after restart.
 
@@ -122,6 +122,8 @@ Wave 4 does not promise that process crash and graceful shutdown have identical 
 - `codexluna_status` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
 - `codexluna_cancel` accepts optional `web_session_id`, validates job ownership, and returns `recovery_outcome` plus cancellation-request state.
 - Tool descriptions/instructions document same-session reacquisition and no-replay boundaries.
+- Direct terminal results expose `web_session_id`; start/exec/follow-up tools use the authoritative conversation identity and enforce owner checks.
+- Herdr operational tools accept optional `web_session_id`, persist workspace/pane ownership in standalone state, and enforce it independently of filesystem permission mode.
 
 No terminal, Herdr, or external-MCP result schema was expanded with speculative ambiguity fields because those layers do not expose a new reliable ambiguity detector in this wave.
 
@@ -134,6 +136,8 @@ No terminal, Herdr, or external-MCP result schema was expanded with speculative 
 - `last_job_id` is proven unsafe for A-specific recovery when A is followed by same-payload B; exact `job_id` still recovers A.
 - Cancellation races cover both `completion -> cancel -> close` and `cancel -> completion/close` while preserving observed evidence.
 - Two equivalent concurrent terminal starts remain distinct jobs and produce distinct processes/results.
+- Session A terminal start followed by Session B status/stdin/cancel is rejected, while Session A can continue the same exact job.
+- Herdr Session A adoption persists across a fresh GWC process; Session B cannot re-adopt the same workspace by cwd or read/status its pane, including under `danger-full-access`.
 - Herdr/MCP instructions explicitly forbid automatic resend after uncertain `pane_run` acknowledgement/result.
 - Existing request-trace/harness and external-MCP timeout regression tests remain green.
 
