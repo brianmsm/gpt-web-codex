@@ -80,12 +80,17 @@ function optionalConversationSessionId(
   explicit: string | undefined,
   meta: Record<string, unknown> | undefined,
 ): string | undefined {
-  if (explicit?.trim()) return explicit.trim();
+  const explicitSessionId = explicit?.trim() || undefined;
   const chatSession = meta?.["openai/session"];
   if (typeof chatSession === "string" && chatSession.trim()) {
     const digest = createHash("sha256").update(chatSession.trim(), "utf8").digest("hex");
-    return `chatgpt:${digest}`;
+    const metadataSessionId = `chatgpt:${digest}`;
+    if (explicitSessionId && explicitSessionId !== metadataSessionId) {
+      throw new Error("web_session_id does not match the authoritative ChatGPT openai/session metadata");
+    }
+    return metadataSessionId;
   }
+  return explicitSessionId;
 }
 
 function conversationSessionId(

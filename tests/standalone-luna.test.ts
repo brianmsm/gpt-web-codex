@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,11 @@ async function eventually(check: () => boolean, timeoutMs = 5_000): Promise<void
     if (Date.now() > deadline) throw new Error("condition timed out");
     await Bun.sleep(10);
   }
+}
+
+function canonicalWebSessionId(openAiSession: string): string {
+  const digest = createHash("sha256").update(openAiSession.trim(), "utf8").digest("hex");
+  return `chatgpt:${digest}`;
 }
 
 function sampleJob(root: string): LunaJob {
@@ -387,6 +393,108 @@ test("Luna reacquisition is session-scoped and restart ambiguity is public", asy
   }
 });
 
+test("openai/session is authoritative over explicit web_session_id across Luna recovery tools", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-wave4-session-authority-"));
+  const alternateRoot = join(root, "alternate");
+  mkdirSync(alternateRoot);
+  const statePath = join(root, "state.json");
+  const openAiSessionA = "wave4-authority-session-a";
+  const openAiSessionB = "wave4-authority-session-b";
+  const sessionA = canonicalWebSessionId(openAiSessionA);
+  const sessionB = canonicalWebSessionId(openAiSessionB);
+  const jobId = "66666666-6666-4666-8666-666666666666";
+  const store = new LunaStateStore(statePath);
+  const binding = {
+    workspacePath: root, permissionMode: "workspace-write" as const, model: "gpt-5.6-luna", reasoning: "low" as const,
+    fast: true, timeoutMs: 900_000, sessionPolicyVersion: 1,
+  };
+  store.initializeBinding(sessionA, binding);
+  store.initializeBinding(sessionB, binding);
+  store.putJob({ ...sampleJob(root), id: jobId, webSessionId: sessionA, status: "running" });
+
+  const client = new Client({ name: "webgpt-wave4-session-authority-test", version: "1.0.0" });
+  const mismatchMeta = { "openai/session": openAiSessionB };
+  const mismatchMessage = "authoritative ChatGPT openai/session metadata";
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
+    }));
+
+    const mismatchedInit = await client.callTool({
+      name: "codexluna_init",
+      arguments: { web_session_id: sessionA, workspace_path: alternateRoot, permission_mode: "read-only" },
+      _meta: mismatchMeta,
+    });
+    expect(mismatchedInit.isError).toBe(true);
+    expect(JSON.stringify(mismatchedInit.content)).toContain(mismatchMessage);
+
+    const mismatchedStart = await client.callTool({
+      name: "codexluna_start",
+      arguments: { web_session_id: sessionA, prompt: "must not start" },
+      _meta: mismatchMeta,
+    });
+    expect(mismatchedStart.isError).toBe(true);
+    expect(JSON.stringify(mismatchedStart.content)).toContain(mismatchMessage);
+
+    const mismatchedStatus = await client.callTool({
+      name: "codexluna_status",
+      arguments: { web_session_id: sessionA, job_id: jobId },
+      _meta: mismatchMeta,
+    });
+    expect(mismatchedStatus.isError).toBe(true);
+    expect(JSON.stringify(mismatchedStatus.content)).toContain(mismatchMessage);
+
+    const mismatchedCancel = await client.callTool({
+      name: "codexluna_cancel",
+      arguments: { web_session_id: sessionA, job_id: jobId },
+      _meta: mismatchMeta,
+    });
+    expect(mismatchedCancel.isError).toBe(true);
+    expect(JSON.stringify(mismatchedCancel.content)).toContain(mismatchMessage);
+
+    const mismatchedSession = await client.callTool({
+      name: "codexluna_session",
+      arguments: { web_session_id: sessionA },
+      _meta: mismatchMeta,
+    });
+    expect(mismatchedSession.isError).toBe(true);
+    expect(JSON.stringify(mismatchedSession.content)).toContain(mismatchMessage);
+
+    const canonicalA = await client.callTool({
+      name: "codexluna_session",
+      arguments: { web_session_id: sessionA },
+      _meta: { "openai/session": openAiSessionA },
+    });
+    expect(canonicalA.isError).not.toBe(true);
+    expect(canonicalA.structuredContent).toMatchObject({
+      binding: {
+        web_session_id: sessionA, workspace_path: root, permission_mode: "workspace-write", last_job_id: jobId,
+      },
+    });
+
+    const metadataOnlyB = await client.callTool({
+      name: "codexluna_session", arguments: {}, _meta: mismatchMeta,
+    });
+    expect(metadataOnlyB.isError).not.toBe(true);
+    expect(metadataOnlyB.structuredContent).toMatchObject({
+      binding: { web_session_id: sessionB, workspace_path: root, permission_mode: "workspace-write", last_job_id: null },
+    });
+
+    const stillOwnedByA = await client.callTool({
+      name: "codexluna_status",
+      arguments: { web_session_id: sessionA, job_id: jobId },
+      _meta: { "openai/session": openAiSessionA },
+    });
+    expect(stillOwnedByA.isError).not.toBe(true);
+    expect(stillOwnedByA.structuredContent).toMatchObject({
+      web_session_id: sessionA, job_id: jobId, status: "ambiguous", recovery_outcome: "ambiguous",
+    });
+  } finally {
+    await client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("direct files enforce the disclosed workspace and permission mode", () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-files-"));
   const workspace = join(root, "workspace");
@@ -542,6 +650,7 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(client.getInstructions()).toContain("external MCP namespace");
     expect(client.getInstructions()).toContain("not permission to repeat it automatically");
     expect(client.getInstructions()).toContain("last_job_id is only a same-session reacquisition aid");
+    expect(client.getInstructions()).toContain("openai/session metadata, that metadata is the authoritative web-session identity");
     expect(client.getInstructions()).toContain("recovery_outcome=ambiguous");
     expect(client.getInstructions()).toContain("Use herdr_* tools for interactive or persistent workers");
     expect(client.getInstructions()).toContain("Herdr panes contain persistent shells");

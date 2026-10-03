@@ -56,7 +56,9 @@ This intentionally narrows recovery rather than disabling it: the caller can sti
 
 `last_job_id` is not a logical-operation ID, can be superseded by a later start, does not deduplicate equivalent requests, and must not cross web sessions.
 
-`codexluna_status` and `codexluna_cancel` now resolve the current web session and reject a job owned by another web session. Their public output includes `recovery_outcome`.
+When ChatGPT supplies `_meta["openai/session"]`, that metadata is the authoritative source of the web-session identity. An explicit `web_session_id` is accepted alongside it only when it exactly matches the derived canonical ID; a mismatch is rejected before `init`, `start`, `status`, `cancel`, or `session` can read or mutate session state. Explicit `web_session_id` remains a fallback only when `openai/session` metadata is absent.
+
+`codexluna_status` and `codexluna_cancel` resolve the current web session under that authority rule and reject a job owned by another web session. Their public output includes `recovery_outcome`.
 
 ### Terminal recovery
 
@@ -122,6 +124,7 @@ No terminal, Herdr, or external-MCP result schema was expanded with speculative 
 - A transient-looking Luna failure with an actual side effect but no observed mutation event executes exactly once (`attempts === 1`).
 - Interrupted persisted Luna work becomes public `ambiguous`, not false `failed`.
 - Luna status rejects a job from another web session and another session does not inherit `last_job_id`.
+- Metadata session B plus explicit `web_session_id` A is rejected uniformly by `init`, `start`, `status`, `cancel`, and `session`; matching metadata+explicit identity and metadata-only lookup remain valid.
 - Two equivalent concurrent terminal starts remain distinct jobs and produce distinct processes/results.
 - Herdr/MCP instructions explicitly forbid automatic resend after uncertain `pane_run` acknowledgement/result.
 - Existing request-trace/harness and external-MCP timeout regression tests remain green.
