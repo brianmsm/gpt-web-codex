@@ -1,11 +1,27 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { parseExternalMcpConfig } from "../external-mcp/config";
 
 export const SESSION_CAPABILITIES_CONFIG_ENV = "CODEX_CHATGPT_WEB_SESSION_CAPABILITIES_CONFIG";
 const SESSION_KEY = /^chatgpt:[0-9a-f]{64}$/;
 const NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+export function verifyPrivateCapabilityFile(path: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("Capability configuration must be a regular file, not a symlink");
+  }
+  if (process.platform !== "win32") {
+    if ((stat.mode & 0o022) !== 0) {
+      throw new Error("Capability configuration must not be group/world writable");
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("Capability configuration must be owned by the GWC user");
+    }
+  }
+}
+
 
 export interface RestrictedCapabilityProfile {
   readonly name: string;
@@ -92,6 +108,7 @@ export function parseSessionCapabilityConfig(value: unknown, path: string): Sess
       }
       externalConfigPath = resolve(item.external_mcp_config);
       if (!existsSync(externalConfigPath)) throw new Error("Configured external MCP file does not exist for profile " + name);
+      verifyPrivateCapabilityFile(externalConfigPath);
       const externalBytes = readFileSync(externalConfigPath);
       const externalConfig = parseExternalMcpConfig(JSON.parse(externalBytes.toString("utf8")) as unknown, externalConfigPath);
       if (externalConfig.servers.some(server => server.enabled && server.transport !== "stdio")) {
@@ -149,6 +166,7 @@ export function loadSessionCapabilityConfig(path = process.env[SESSION_CAPABILIT
   if (path === undefined || !path.trim()) return undefined;
   const absolute = resolve(path);
   // Explicit opt-in must never silently fall back to unrestricted mode.
+  verifyPrivateCapabilityFile(absolute);
   const json = JSON.parse(readFileSync(absolute, "utf8")) as unknown;
   return parseSessionCapabilityConfig(json, absolute);
 }

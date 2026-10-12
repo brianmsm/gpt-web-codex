@@ -9,6 +9,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { ExternalMcpBridge } from "../external-mcp/bridge";
+import { parseExternalMcpConfig } from "../external-mcp/config";
 import {
   bindSessionCapability,
   type RestrictedCapabilityProfile,
@@ -73,9 +74,15 @@ export class SessionCapabilityBoundary {
       throw new Error("Maximum isolated external MCP sessions reached (fail closed)");
     }
     const initialized = (async () => {
-      const actualDigest = createHash("sha256").update(readFileSync(profile.externalConfigPath!)).digest("hex");
+      const configBytes = readFileSync(profile.externalConfigPath!);
+      const actualDigest = createHash("sha256").update(configBytes).digest("hex");
       if (actualDigest !== profile.externalConfigDigest) throw new Error("Dedicated MCP config changed after policy activation");
-      const result = await ExternalMcpBridge.initialize({ configPath: profile.externalConfigPath });
+      // Use the exact verified bytes rather than re-reading the file after
+      // the hash check. This closes the check-to-launch configuration race.
+      const dedicatedConfig = parseExternalMcpConfig(
+        JSON.parse(configBytes.toString("utf8")) as unknown, profile.externalConfigPath!,
+      );
+      const result = await ExternalMcpBridge.initialize({ config: dedicatedConfig });
       try {
         const available = new Set(result.publicTools().map(tool => tool.publicName));
         for (const name of profile.externalTools) {

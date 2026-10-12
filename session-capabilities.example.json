@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "default_policy": "legacy",
+  "max_external_sessions": 8,
+  "profiles": {
+    "no-tools": {
+      "version": 1,
+      "native_tools": [],
+      "external_tools": []
+    },
+    "diagnostics-only": {
+      "version": 1,
+      "native_tools": [
+        "herdr_status"
+      ],
+      "external_tools": []
+    }
+  },
+  "session_bindings": {}
+}
