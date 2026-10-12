@@ -22,6 +22,8 @@ import {
 } from "./mcp-request-trace";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
 import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
+import { sessionKeyFromOpenAiMetadata, loadSessionCapabilityConfig } from "../../standalone/session-capabilities/config";
+import { SessionCapabilityBoundary } from "../../standalone/session-capabilities/boundary";
 import {
   COMPACT_SESSION_POLICY,
   MCP_SERVER_INSTRUCTIONS,
@@ -276,10 +278,18 @@ export async function runChatGptMcpServer(options: {
   const herdr = options.herdrClient ?? new HerdrClient();
   const imagePreviews = new ImagePreviewCache(options.statePath);
   const requestTrace = McpRequestTracer.fromEnvironment();
+  const capabilityConfig = loadSessionCapabilityConfig();
+  const policyNativeNames = capabilityConfig
+    ? new Set([...GWC_NATIVE_TOOL_NAMES, "capability_identity"])
+    : GWC_NATIVE_TOOL_NAMES;
+  const capabilityBoundary = capabilityConfig
+    ? new SessionCapabilityBoundary(capabilityConfig, policyNativeNames)
+    : undefined;
   const server = new McpServer(
     { name: "gpt-web-codex", version: VERSION },
     { instructions: MCP_SERVER_INSTRUCTIONS },
   );
+  capabilityBoundary?.install(server);
   let externalMcp: ExternalMcpBridge | undefined;
   let shutdownStarted = false;
   const shutdownServices = async (): Promise<void> => {
@@ -288,6 +298,7 @@ export async function runChatGptMcpServer(options: {
     jobs.shutdown();
     direct.shutdown();
     await externalMcp?.shutdown();
+    await capabilityBoundary?.shutdown();
   };
   const shutdown = () => {
     void shutdownServices().finally(() => {
@@ -301,6 +312,34 @@ export async function runChatGptMcpServer(options: {
     process.off("SIGTERM", shutdown);
     void shutdownServices();
   };
+
+  if (capabilityBoundary) {
+    server.registerTool("capability_identity", {
+      title: "Inspect this conversation's capability enrollment identifier",
+      description:
+        "Read-only pre-enrollment diagnostic for the current ChatGPT conversation. "
+        + "It cannot assign or change a policy. A local administrator must bind "
+        + "the returned session hash through an out-of-band protected config and restart GWC. "
+        + "This does not authenticate arbitrary MCP clients that can forge request metadata.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: z.object({
+        session_key: z.string(),
+        policy_config_sha256: z.string(),
+        selected_profile: z.string(),
+        profile_version: z.number().int().nullable(),
+        configured_native_tools: z.array(z.string()).nullable(),
+        configured_external_tools: z.array(z.string()).nullable(),
+        effective_tools_verified_by_real_client: z.boolean(),
+        chatgpt_other_plugins_controlled: z.boolean(),
+        chatgpt_memory_controlled: z.boolean(),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      _meta: { securitySchemes: noAuth },
+    }, async (_input, extra) => {
+      const sessionKey = sessionKeyFromOpenAiMetadata(extra._meta);
+      return result(capabilityBoundary.inspection(sessionKey));
+    });
+  }
 
   registerHerdrTools(server, herdr, jobs.store, conversationSessionId);
 
@@ -894,7 +933,7 @@ export async function runChatGptMcpServer(options: {
 
   try {
     externalMcp = await ExternalMcpBridge.initialize({ configPath: options.externalMcpConfigPath });
-    await externalMcp.registerTools(server, GWC_NATIVE_TOOL_NAMES);
+    await externalMcp.registerTools(server, policyNativeNames);
     await server.connect(new TracingStdioServerTransport(requestTrace));
   } catch (error) {
     process.off("SIGINT", shutdown);

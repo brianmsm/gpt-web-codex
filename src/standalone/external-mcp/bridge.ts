@@ -337,6 +337,39 @@ export class ExternalMcpBridge {
     }
   }
 
+  /**
+   * A dedicated bridge is keyed to one claimed conversation identity. No tools are
+   * registered into the global GWC catalog by this method.
+   */
+  publicTools(): ExternalMcpPublicTool[] {
+    return this.runtimes.flatMap(runtime => runtime.lifecycle === "connected" ? [...runtime.exposedTools] : []);
+  }
+
+  async callPublicTool(publicName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    for (const runtime of this.runtimes) {
+      if (runtime.lifecycle !== "connected" || !runtime.client) continue;
+      const tool = runtime.exposedTools.find(candidate => candidate.publicName === publicName);
+      if (!tool) continue;
+      try {
+        const response = await runtime.client.callTool(
+          { name: tool.originalName, arguments: args },
+          undefined,
+          { timeout: runtime.config.callTimeoutMs, maxTotalTimeout: runtime.config.callTimeoutMs },
+        );
+        if ("toolResult" in response) {
+          return toolError(runtime.config.alias, tool.originalName, "task-augmented results are not supported", runtime);
+        }
+        return safeExternalResult(response, runtime.config.alias, tool.originalName);
+      } catch (error) {
+        return toolError(runtime.config.alias, tool.originalName, error, runtime);
+      }
+    }
+    return {
+      content: [{ type: "text", text: "Capability policy denied tool invocation" }],
+      isError: true,
+    };
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
