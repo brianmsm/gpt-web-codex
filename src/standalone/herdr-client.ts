@@ -353,6 +353,25 @@ export class HerdrClient {
     };
   }
 
+  async inspectWorkspace(sessionName: string, workspaceId: string, scope: HerdrAccessScope) {
+    const session = await this.requireOperationalSession(sessionName, scope);
+    const state = await this.snapshot(session);
+    const workspace = state.workspaces.find(value => isRecord(value) && value.workspace_id === workspaceId);
+    if (!isRecord(workspace)) {
+      throw new HerdrClientError(`Herdr workspace not found: ${workspaceId}`, "not_found", "workspace_not_found");
+    }
+    this.assertWorkspaceInScope(state, workspaceId, scope);
+    const panes = state.panes.filter(value => isRecord(value) && value.workspace_id === workspaceId) as Record<string, unknown>[];
+    const tabs = state.tabs.filter(value => isRecord(value) && value.workspace_id === workspaceId) as Record<string, unknown>[];
+    return {
+      session: session.name,
+      socket_path: session.socketPath,
+      workspace,
+      tabs,
+      panes,
+    };
+  }
+
   async createWorktree(sessionName: string, input: {
     sourceCwd: string; branch: string; base?: string; path?: string; label?: string;
   }, scope: HerdrAccessScope) {

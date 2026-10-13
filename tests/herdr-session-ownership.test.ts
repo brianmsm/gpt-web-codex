@@ -29,6 +29,15 @@ function fakeHerdr(root: string): HerdrClient {
         panes: [{ pane_id: PANE_ID, workspace_id: WORKSPACE_ID, tab_id: TAB_ID, cwd: root }],
       };
     },
+    async inspectWorkspace() {
+      return {
+        session: HERDR_SESSION,
+        socket_path: "/tmp/herdr.sock",
+        workspace: { workspace_id: WORKSPACE_ID, active_tab_id: TAB_ID },
+        tabs: [{ tab_id: TAB_ID, workspace_id: WORKSPACE_ID }],
+        panes: [{ pane_id: PANE_ID, workspace_id: WORKSPACE_ID, tab_id: TAB_ID, cwd: root }],
+      };
+    },
     async readPane() {
       return {
         session: HERDR_SESSION,
@@ -196,6 +205,138 @@ test("Herdr ownership survives GWC restart and blocks cross-session cwd or pane 
   } finally {
     if (first) await first.close();
     if (restarted) await restarted.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit Herdr workspace transfer rebinds a known live workspace to a new ChatGPT conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-herdr-session-transfer-"));
+  const statePath = join(root, "state.json");
+  const sessionA = "herdr-transfer-owner-a";
+  const sessionB = "herdr-transfer-owner-b";
+  const canonicalA = conversationSessionId(undefined, { "openai/session": sessionA }, false);
+  const canonicalB = conversationSessionId(undefined, { "openai/session": sessionB }, false);
+  const harness = await ownershipHarness(root, statePath);
+  try {
+    const adopted = await harness.client.callTool({
+      name: "herdr_workspace_open",
+      arguments: {
+        session: HERDR_SESSION,
+        cwd: root,
+        workspace_path: root,
+        permission_mode: "read-only",
+      },
+      _meta: { "openai/session": sessionA },
+    });
+    expect(adopted.isError).not.toBe(true);
+
+    const transferred = await harness.client.callTool({
+      name: "herdr_workspace_transfer",
+      arguments: {
+        session: HERDR_SESSION,
+        workspace_id: WORKSPACE_ID,
+        expected_previous_owner: canonicalA,
+        confirm_transfer: true,
+        workspace_path: root,
+        permission_mode: "workspace-write",
+      },
+      _meta: { "openai/session": sessionB },
+    });
+    expect(transferred.isError).not.toBe(true);
+    expect(transferred.structuredContent).toMatchObject({
+      workspace_id: WORKSPACE_ID,
+      previous_owner: canonicalA,
+      new_owner: canonicalB,
+      pane_ids: [PANE_ID],
+      transferred: true,
+      already_owned: false,
+      web_session_id: canonicalB,
+    });
+
+    const newOwnerRead = await harness.client.callTool({
+      name: "herdr_pane_read",
+      arguments: {
+        session: HERDR_SESSION,
+        pane_id: PANE_ID,
+        workspace_path: root,
+        permission_mode: "read-only",
+      },
+      _meta: { "openai/session": sessionB },
+    });
+    expect(newOwnerRead.isError).not.toBe(true);
+    expect(newOwnerRead.structuredContent).toMatchObject({
+      web_session_id: canonicalB,
+      read: { pane_id: PANE_ID, text: "owned output" },
+    });
+
+    const oldOwnerRead = await harness.client.callTool({
+      name: "herdr_pane_read",
+      arguments: {
+        session: HERDR_SESSION,
+        pane_id: PANE_ID,
+        workspace_path: root,
+        permission_mode: "read-only",
+      },
+      _meta: { "openai/session": sessionA },
+    });
+    expect(oldOwnerRead.isError).toBe(true);
+    expect(oldOwnerRead.structuredContent).toMatchObject({ error: { code: "cross_session_ownership" } });
+    expect(JSON.stringify(oldOwnerRead.content)).toContain("[cross_session_ownership]");
+
+    const reloaded = new LunaStateStore(statePath);
+    expect(reloaded.herdrWorkspaceOwner(HERDR_SESSION, WORKSPACE_ID)).toBe(canonicalB);
+    expect(reloaded.herdrPaneOwner(HERDR_SESSION, PANE_ID)).toBe(canonicalB);
+    expect(reloaded.snapshot().herdrOwnership.transfers[0]).toMatchObject({
+      sessionName: HERDR_SESSION,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: root,
+      previousOwner: canonicalA,
+      newOwner: canonicalB,
+      paneIds: [PANE_ID],
+    });
+  } finally {
+    await harness.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Herdr workspace transfer refuses a stale expected owner without changing ownership", async () => {
+  const root = mkdtempSync(join(tmpdir(), "webgpt-herdr-session-transfer-stale-"));
+  const statePath = join(root, "state.json");
+  const sessionA = "herdr-transfer-stale-a";
+  const sessionB = "herdr-transfer-stale-b";
+  const canonicalA = conversationSessionId(undefined, { "openai/session": sessionA }, false);
+  const harness = await ownershipHarness(root, statePath);
+  try {
+    await harness.client.callTool({
+      name: "herdr_workspace_open",
+      arguments: {
+        session: HERDR_SESSION,
+        cwd: root,
+        workspace_path: root,
+        permission_mode: "read-only",
+      },
+      _meta: { "openai/session": sessionA },
+    });
+
+    const stale = await harness.client.callTool({
+      name: "herdr_workspace_transfer",
+      arguments: {
+        session: HERDR_SESSION,
+        workspace_id: WORKSPACE_ID,
+        expected_previous_owner: "chatgpt:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        confirm_transfer: true,
+        workspace_path: root,
+        permission_mode: "workspace-write",
+      },
+      _meta: { "openai/session": sessionB },
+    });
+    expect(stale.isError).toBe(true);
+    expect(stale.structuredContent).toMatchObject({ error: { code: "herdr_transfer_owner_mismatch" } });
+    expect(JSON.stringify(stale.content)).toContain("[herdr_transfer_owner_mismatch]");
+    expect(new LunaStateStore(statePath).herdrWorkspaceOwner(HERDR_SESSION, WORKSPACE_ID)).toBe(canonicalA);
+  } finally {
+    await harness.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

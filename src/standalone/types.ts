@@ -55,9 +55,20 @@ export interface LunaJob {
   logPath: string;
 }
 
+export interface HerdrOwnershipTransfer {
+  transferredAt: string;
+  sessionName: string;
+  workspaceId: string;
+  workspacePath: string;
+  previousOwner: string;
+  newOwner: string;
+  paneIds: string[];
+}
+
 export interface HerdrOwnershipState {
   workspaces: Record<string, Record<string, string>>;
   panes: Record<string, Record<string, string>>;
+  transfers: HerdrOwnershipTransfer[];
 }
 
 export interface LunaState {

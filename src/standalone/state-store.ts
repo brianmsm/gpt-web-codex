@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
-import type { ImagePreviewPresentation, LunaJob, LunaReasoning, LunaSandbox, LunaSessionBinding, LunaState } from "./types";
+import type { HerdrOwnershipTransfer, ImagePreviewPresentation, LunaJob, LunaReasoning, LunaSandbox, LunaSessionBinding, LunaState } from "./types";
 
 export interface InitializeSessionBindingInput {
   workspacePath: string;
@@ -22,7 +22,7 @@ export function defaultStandaloneLogDir(statePath = defaultStandaloneStatePath()
 }
 
 function emptyState(): LunaState {
-  return { version: 1, sessions: {}, jobs: {}, herdrOwnership: { workspaces: {}, panes: {} } };
+  return { version: 1, sessions: {}, jobs: {}, herdrOwnership: { workspaces: {}, panes: {}, transfers: [] } };
 }
 
 function assertRecord(value: unknown, name: string): asserts value is Record<string, unknown> {
@@ -46,14 +46,16 @@ export class LunaStateStore {
     assertRecord(parsed.sessions, "standalone sessions");
     assertRecord(parsed.jobs, "standalone jobs");
     if (parsed.herdrOwnership === undefined) {
-      parsed.herdrOwnership = { workspaces: {}, panes: {} };
+      parsed.herdrOwnership = { workspaces: {}, panes: {}, transfers: [] };
     }
     assertRecord(parsed.herdrOwnership, "Herdr ownership state");
     const ownership = parsed.herdrOwnership as Record<string, unknown>;
     if (ownership.workspaces === undefined) ownership.workspaces = {};
     if (ownership.panes === undefined) ownership.panes = {};
+    if (ownership.transfers === undefined) ownership.transfers = [];
     assertRecord(ownership.workspaces, "Herdr workspace ownership");
     assertRecord(ownership.panes, "Herdr pane ownership");
+    if (!Array.isArray(ownership.transfers)) throw new Error("Invalid Herdr ownership transfer audit log");
     for (const [sessionName, value] of Object.entries(ownership.workspaces)) {
       assertRecord(value, `Herdr workspace ownership for session ${sessionName}`);
     }
@@ -115,6 +117,58 @@ export class LunaStateStore {
     bySession[paneId] = webSessionId;
     this.ensureBinding(webSessionId);
     this.save();
+  }
+
+  transferHerdrWorkspaceOwnership(input: {
+    newOwner: string;
+    sessionName: string;
+    workspaceId: string;
+    workspacePath: string;
+    expectedPreviousOwner: string;
+    paneIds: string[];
+    maxAuditEntries?: number;
+  }): HerdrOwnershipTransfer {
+    const workspaceOwners = this.state.herdrOwnership.workspaces[input.sessionName] ??= {};
+    const currentOwner = workspaceOwners[input.workspaceId];
+    if (currentOwner !== input.expectedPreviousOwner) {
+      throw new Error(`Herdr workspace owner changed before transfer: expected ${input.expectedPreviousOwner}, received ${currentOwner ?? "unowned"}`);
+    }
+
+    const paneOwners = this.state.herdrOwnership.panes[input.sessionName] ??= {};
+    for (const paneId of input.paneIds) {
+      const owner = paneOwners[paneId];
+      if (owner && owner !== input.expectedPreviousOwner && owner !== input.newOwner) {
+        throw new Error(`Herdr pane owner changed before transfer: ${paneId}`);
+      }
+    }
+
+    const transferredAt = new Date().toISOString();
+    workspaceOwners[input.workspaceId] = input.newOwner;
+    for (const paneId of input.paneIds) paneOwners[paneId] = input.newOwner;
+
+    if (!this.state.sessions[input.newOwner]) {
+      this.state.sessions[input.newOwner] = {
+        webSessionId: input.newOwner,
+        createdAt: transferredAt,
+        updatedAt: transferredAt,
+      };
+    } else {
+      this.state.sessions[input.newOwner]!.updatedAt = transferredAt;
+    }
+
+    const transfer: HerdrOwnershipTransfer = {
+      transferredAt,
+      sessionName: input.sessionName,
+      workspaceId: input.workspaceId,
+      workspacePath: input.workspacePath,
+      previousOwner: input.expectedPreviousOwner,
+      newOwner: input.newOwner,
+      paneIds: [...new Set(input.paneIds)].sort(),
+    };
+    const maxAuditEntries = Math.max(1, input.maxAuditEntries ?? 128);
+    this.state.herdrOwnership.transfers = [transfer, ...this.state.herdrOwnership.transfers].slice(0, maxAuditEntries);
+    this.save();
+    return transfer;
   }
 
   imagePreviewPresentation(webSessionId: string, contentKey: string): ImagePreviewPresentation | undefined {

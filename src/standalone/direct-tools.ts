@@ -1,10 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  type Dirent,
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   linkSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -15,6 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import sharp from "sharp";
 import type { LunaSandbox } from "./types";
@@ -25,6 +29,9 @@ const MAX_SOURCE_IMAGE_BYTES = 50_000_000;
 const MODEL_IMAGE_MAX_DIMENSION = 1_600;
 const MAX_TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT_MUTATION_TRANSACTION_BYTES = 64 * 1024 * 1024;
+const BROWSER_UPLOAD_STAGING_PREFIX = "gpt-web-codex-browser-upload-";
+const BROWSER_UPLOAD_STAGING_TTL_MS = 24 * 60 * 60 * 1_000;
+const MAX_BROWSER_UPLOAD_STAGING_BYTES = 500_000_000;
 
 export interface DirectTextFileRead {
   path: string;
@@ -88,6 +95,47 @@ export function resolveScopedPath(path: string, workspace: string, mode: LunaSan
 
 function assertWritableMode(mode: LunaSandbox, operation: string): void {
   if (mode === "read-only") throw new Error(`${operation} is disabled in read-only mode`);
+}
+
+function cleanupStaleBrowserUploadStaging(): void {
+  const root = tmpdir();
+  const cutoff = Date.now() - BROWSER_UPLOAD_STAGING_TTL_MS;
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(BROWSER_UPLOAD_STAGING_PREFIX)) continue;
+    const candidate = resolve(root, entry.name);
+    try {
+      if (lstatSync(candidate).mtimeMs < cutoff) rmSync(candidate, { recursive: true, force: true });
+    } catch {
+      // Cleanup is opportunistic and must never block a new staging operation.
+    }
+  }
+}
+
+function resolveBrowserUploadSource(path: string, workspace: string, mode: LunaSandbox): {
+  path: string;
+  bytes: number;
+} {
+  const scoped = resolveScopedPath(path, workspace, mode);
+  const entry = lstatSync(scoped);
+  if (entry.isSymbolicLink()) {
+    throw new Error(`Refusing to stage a browser upload through a symbolic link: ${scoped}`);
+  }
+  const canonical = realpathSync(scoped);
+  if (mode !== "danger-full-access") {
+    const workspaceRoot = realpathSync(resolve(workspace));
+    if (!within(canonical, workspaceRoot)) {
+      throw new Error(`Browser upload source resolves outside the disclosed workspace through a link: ${scoped}`);
+    }
+  }
+  const metadata = statSync(canonical);
+  if (!metadata.isFile()) throw new Error(`Browser upload source is not a regular file: ${canonical}`);
+  return { path: canonical, bytes: metadata.size };
 }
 
 function pathEntryExists(path: string): boolean {
@@ -680,6 +728,42 @@ export class DirectToolService {
       }
     }
     throw new Error(`Image could not be reduced below the ${limit}-byte MCP transfer limit: ${target} (smallest ${best?.bytes.length ?? source.length} bytes)`);
+  }
+
+  stageBrowserUpload(
+    path: string,
+    workspace: string,
+    mode: LunaSandbox,
+    maxBytes = 100_000_000,
+  ): { source_path: string; staged_path: string; bytes: number; staging_ttl_ms: number } {
+    assertWritableMode(mode, "Browser upload staging");
+    const source = resolveBrowserUploadSource(path, workspace, mode);
+    const limit = Math.min(Math.max(1, maxBytes), MAX_BROWSER_UPLOAD_STAGING_BYTES);
+    if (source.bytes > limit) {
+      throw new Error(`Browser upload source exceeds the ${limit}-byte staging limit: ${source.path}`);
+    }
+
+    cleanupStaleBrowserUploadStaging();
+    const stagingDir = mkdtempSync(resolve(tmpdir(), BROWSER_UPLOAD_STAGING_PREFIX));
+    const stagedPath = resolve(stagingDir, basename(source.path));
+    try {
+      if (process.platform !== "win32") chmodSync(stagingDir, 0o700);
+      copyFileSync(source.path, stagedPath);
+      if (process.platform !== "win32") chmodSync(stagedPath, 0o600);
+      const staged = statSync(stagedPath);
+      if (!staged.isFile() || staged.size !== source.bytes) {
+        throw new Error(`Browser upload staging verification failed for ${source.path}`);
+      }
+      return {
+        source_path: source.path,
+        staged_path: stagedPath,
+        bytes: staged.size,
+        staging_ttl_ms: BROWSER_UPLOAD_STAGING_TTL_MS,
+      };
+    } catch (error) {
+      rmSync(stagingDir, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   list(path: string, workspace: string, mode: LunaSandbox): {

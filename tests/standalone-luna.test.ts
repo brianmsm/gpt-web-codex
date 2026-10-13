@@ -905,9 +905,9 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     expect(names).toEqual([
       "codexluna_cancel", "codexluna_init", "codexluna_session", "codexluna_start", "codexluna_status",
       "external_mcp_status",
-      "file_apply_patch", "file_create_directory", "file_delete_directory", "file_edit", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_write",
+      "file_apply_patch", "file_create_directory", "file_delete_directory", "file_edit", "file_image_preview", "file_image_preview_restore", "file_import_attachment", "file_list", "file_read", "file_search", "file_stage_browser_upload", "file_write",
       "herdr_pane_read", "herdr_pane_run", "herdr_pane_send", "herdr_pane_split", "herdr_pane_status", "herdr_pane_wait",
-      "herdr_status", "herdr_tab_create", "herdr_workspace_open", "herdr_worktree_create",
+      "herdr_status", "herdr_tab_create", "herdr_workspace_open", "herdr_workspace_transfer", "herdr_worktree_create",
       "terminal_cancel", "terminal_exec", "terminal_start", "terminal_status", "terminal_write_stdin",
     ]);
     expect(listedTools.every(tool => tool.outputSchema && typeof tool.outputSchema === "object")).toBe(true);
@@ -992,6 +992,23 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
       properties: { file: { type: "object" }, destination: { type: "string" }, workspace_path: { type: "string" } },
     });
     expect(importTool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    const browserStageTool = listedTools.find(tool => tool.name === "file_stage_browser_upload");
+    expect(browserStageTool?.description).toContain("never starts an HTTP server");
+    expect(browserStageTool?.inputSchema).toMatchObject({
+      properties: {
+        path: { type: "string" }, workspace_path: { type: "string" },
+        permission_mode: { type: "string", default: "workspace-write" },
+        max_bytes: { type: "integer", default: 100000000 },
+      },
+      required: expect.arrayContaining(["path", "workspace_path"]),
+    });
+    expect(browserStageTool?.annotations).toMatchObject({
+      readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+    });
+    expect(browserStageTool?._meta).toMatchObject({
+      "openai/toolInvocation/invoking": "Staging browser upload",
+      "openai/toolInvocation/invoked": "Browser upload staged",
+    });
     const editTool = listedTools.find(tool => tool.name === "file_edit");
     const patchTool = listedTools.find(tool => tool.name === "file_apply_patch");
     expect(editTool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
