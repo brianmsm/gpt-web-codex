@@ -322,6 +322,9 @@ export async function runChatGptMcpServer(options: {
         "Read-only pre-enrollment diagnostic for the current ChatGPT conversation. "
         + "It cannot assign or change a policy. A local administrator must bind "
         + "the returned session hash through an out-of-band protected config and restart GWC. "
+        + "Docs for generic Session Capability Profiles: docs/session-capabilities.md and "
+        + "docs/session-capabilities-operations.md (GWC source checkout). "
+        + "This identity tool does not authorize or change permissions. "
         + "This does not authenticate arbitrary MCP clients that can forge request metadata.",
       inputSchema: z.object({}).strict(),
       outputSchema: z.object({

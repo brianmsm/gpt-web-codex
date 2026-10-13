@@ -273,7 +273,10 @@ export class ExternalMcpBridge {
       title: "Inspect external MCP bridge status",
       description:
         "Read the sanitized startup and lifecycle status of explicitly configured external MCP servers. "
-        + "This never returns external environment values, credentials, tokens, headers, or full sensitive configuration.",
+        + "For per-conversation native/external tool restrictions, see GWC Session Capability Profiles: "
+        + "docs/session-capabilities.md and docs/session-capabilities-operations.md in the source checkout. "
+        + "This tool does not modify permissions or return external environment values, credentials, "
+        + "tokens, headers, or full sensitive configuration.",
       inputSchema: z.object({}).strict(),
       outputSchema: z.object({
         config_loaded: z.boolean(),
