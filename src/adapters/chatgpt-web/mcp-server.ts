@@ -326,6 +326,7 @@ export async function runChatGptMcpServer(options: {
         session_key: z.string(),
         policy_config_sha256: z.string(),
         selected_profile: z.string(),
+        catalog_mode: z.enum(["per_session", "shared"]),
         profile_version: z.number().int().nullable(),
         configured_native_tools: z.array(z.string()).nullable(),
         configured_external_tools: z.array(z.string()).nullable(),

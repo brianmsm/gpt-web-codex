@@ -128,6 +128,10 @@ export class SessionCapabilityBoundary {
   }
 
   async list(base: ListToolsResult, meta: Record<string, unknown> | undefined): Promise<ListToolsResult> {
+    // Real ChatGPT enumerates tools at connector scope without openai/session.
+    // In shared mode publish a stable inventory, then authorize EVERY call by
+    // conversation. This is execution isolation, NOT private tool visibility.
+    if (this.config.catalogMode === "shared") return base;
     const binding = this.binding(meta);
     if (!binding) return { tools: [] };
     if (binding.kind === "denied") return {
@@ -165,6 +169,10 @@ export class SessionCapabilityBoundary {
       return profile.nativeTools.has(name) ? next() : rejected();
     }
     if (!profile.externalTools.has(name)) return rejected();
+    // The shared inventory already contains each global external MCP tool.
+    // Run the ordinary SDK handler only after this session has been allowed.
+    // WARNING: global external MCP processes/state are not session-isolated.
+    if (this.config.catalogMode === "shared") return next();
     try {
       const bridge = await this.bridge(binding);
       if (!bridge.publicTools().some(tool => tool.publicName === name)) return rejected();
@@ -220,6 +228,7 @@ export class SessionCapabilityBoundary {
       policy_config_sha256: this.config.digest,
       session_key: sessionKey,
       selected_profile: name ?? this.config.defaultPolicy,
+      catalog_mode: this.config.catalogMode,
       profile_version: profile?.version ?? null,
       configured_native_tools: profile ? [...profile.nativeTools].sort() : null,
       configured_external_tools: profile ? [...profile.externalTools].sort() : null,

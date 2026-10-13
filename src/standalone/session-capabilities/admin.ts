@@ -53,6 +53,7 @@ function publicSummary(configPath: string, sessionKey?: string) {
   return {
     config_sha256: config.digest,
     default_policy: config.defaultPolicy,
+    catalog_mode: config.catalogMode,
     configured_sessions: config.bindings.size,
     max_external_sessions: config.maxExternalSessions,
     profiles: [...config.profiles.values()].map(item => ({

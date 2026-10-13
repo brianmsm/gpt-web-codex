@@ -42,6 +42,8 @@ export interface SessionCapabilityConfig {
   readonly path: string;
   readonly digest: string;
   readonly defaultPolicy: "legacy" | "deny";
+  /** shared advertises one stable catalog; calls remain scoped by session. */
+  readonly catalogMode: "per_session" | "shared";
   readonly profiles: ReadonlyMap<string, RestrictedCapabilityProfile>;
   readonly bindings: ReadonlyMap<string, string>;
   readonly maxExternalSessions: number;
@@ -80,10 +82,14 @@ export function sessionKeyFromOpenAiMetadata(meta: Record<string, unknown> | und
 
 export function parseSessionCapabilityConfig(value: unknown, path: string): SessionCapabilityConfig {
   const raw = object(value, "Session capability config");
-  keys(raw, ["version", "default_policy", "profiles", "session_bindings", "max_external_sessions"], "Session capability config");
+  keys(raw, ["version", "default_policy", "catalog_mode", "profiles", "session_bindings", "max_external_sessions"], "Session capability config");
   if (raw.version !== 1) throw new Error("Session capability config version must be 1");
   if (raw.default_policy !== "legacy" && raw.default_policy !== "deny") {
     throw new Error("default_policy must be legacy or deny");
+  }
+  const catalogMode = raw.catalog_mode ?? "per_session";
+  if (catalogMode !== "per_session" && catalogMode !== "shared") {
+    throw new Error("catalog_mode must be per_session or shared");
   }
   const maxExternalSessions = raw.max_external_sessions ?? 8;
   if (!Number.isSafeInteger(maxExternalSessions) || (maxExternalSessions as number) < 1 || (maxExternalSessions as number) > 32) {
@@ -103,6 +109,9 @@ export function parseSessionCapabilityConfig(value: unknown, path: string): Sess
     let externalConfigPath: string | undefined;
     let externalConfigDigest: string | undefined;
     if (item.external_mcp_config !== undefined) {
+      if (catalogMode === "shared") {
+        throw new Error("shared catalog mode cannot launch session-private external MCP servers; configure global MCP tools or use separate connectors");
+      }
       if (typeof item.external_mcp_config !== "string" || !isAbsolute(item.external_mcp_config)) {
         throw new Error("profile " + name + ".external_mcp_config must be an absolute path");
       }
@@ -115,7 +124,7 @@ export function parseSessionCapabilityConfig(value: unknown, path: string): Sess
         throw new Error("Restricted profile " + name + " requires session-private stdio MCP processes; shared HTTP is unsupported");
       }
       externalConfigDigest = createHash("sha256").update(externalBytes).digest("hex");
-    } else if (externalTools.size) {
+    } else if (externalTools.size && catalogMode !== "shared") {
       throw new Error("profile " + name + " allows external tools without a dedicated external MCP config");
     }
     if (externalConfigPath && !externalTools.size) {
@@ -142,6 +151,7 @@ export function parseSessionCapabilityConfig(value: unknown, path: string): Sess
   const normalized = JSON.stringify({
     version: 1,
     default_policy: raw.default_policy,
+    catalog_mode: catalogMode,
     profiles: [...profiles].map(([name, profile]) => ({
       name, version: profile.version,
       native_tools: [...profile.nativeTools].sort(),
@@ -155,6 +165,7 @@ export function parseSessionCapabilityConfig(value: unknown, path: string): Sess
     path,
     digest: createHash("sha256").update(normalized).digest("hex"),
     defaultPolicy: raw.default_policy,
+    catalogMode: catalogMode,
     maxExternalSessions: maxExternalSessions as number,
     profiles,
     bindings,

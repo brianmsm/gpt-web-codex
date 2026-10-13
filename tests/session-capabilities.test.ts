@@ -106,6 +106,101 @@ test("capability parser is strict, opt-in and rejects wildcard or unbound extern
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("shared discovery catalogs all registered tools while enforcing exact per-session dispatch grants", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-shared-session-policy-"));
+  const globalPath = join(root, "global.json");
+  writeFileSync(globalPath, JSON.stringify({ version: 1, servers: {
+    global: { transport: "stdio", command: process.execPath, args: [fixture],
+      tools: { allow: ["readonly_status", "mutate"] } },
+  } }));
+  const policyPath = join(root, "policy.json");
+  const policy = {
+    version: 1,
+    catalog_mode: "shared",
+    default_policy: "legacy",
+    profiles: {
+      readonly: {
+        version: 1, native_tools: ["external_mcp_status"],
+        external_tools: ["global__readonly_status"],
+      },
+      sealed: { version: 1, native_tools: [], external_tools: [] },
+    },
+    session_bindings: {
+      [sessionKeyFromOpenAiMetadata(meta(syntheticA))]: "readonly",
+      [sessionKeyFromOpenAiMetadata(meta(syntheticB))]: "sealed",
+    },
+  };
+  writeFileSync(policyPath, JSON.stringify(policy));
+  let client: Client | undefined;
+  try {
+    client = await connect(join(root, "state.json"), policyPath, globalPath);
+    const catalog = (await client.listTools()).tools.map(tool => tool.name).sort();
+    expect(catalog).toContain("terminal_exec");
+    expect(catalog).toContain("file_read");
+    expect(catalog).toContain("global__readonly_status");
+    expect(catalog).toContain("global__mutate");
+    expect(catalog).toContain("capability_identity");
+    // ChatGPT supplies no openai/session on tools/list. Unlike the previous
+    // per-session mode, shared discovery remains stable across conversations.
+    expect((await client.listTools({ _meta: meta(syntheticA) })).tools.map(t => t.name).sort())
+      .toEqual(catalog);
+    expect((await client.listTools({ _meta: meta(syntheticB) })).tools.map(t => t.name).sort())
+      .toEqual(catalog);
+    expect((await client.listTools({ _meta: meta(syntheticCoordinator) })).tools.map(t => t.name).sort())
+      .toEqual(catalog);
+
+    const allowedNative = await call(client, syntheticA, "external_mcp_status");
+    expect(allowedNative.isError).not.toBe(true);
+    const allowedExternal = await call(client, syntheticA, "global__readonly_status");
+    expect(allowedExternal.isError).not.toBe(true);
+    expect(allowedExternal.content).toContainEqual({ type: "text", text: "fixture-ok" });
+    const inspector = await call(client, syntheticCoordinator, "capability_identity");
+    expect(inspector.structuredContent).toMatchObject({
+      catalog_mode: "shared", selected_profile: "legacy",
+      effective_tools_verified_by_real_client: false,
+    });
+
+    for (const forbidden of ["terminal_exec", "file_read", "file_write", "herdr_pane_run",
+      "codexluna_start", "global__mutate", "capability_identity"]) {
+      expect((await call(client, syntheticA, forbidden)).isError).toBe(true);
+    }
+    for (const forbidden of ["terminal_exec", "file_read", "external_mcp_status",
+      "global__readonly_status", "global__mutate", "capability_identity"]) {
+      expect((await call(client, syntheticB, forbidden)).isError).toBe(true);
+    }
+    expect((await call(client, undefined, "global__readonly_status")).isError).toBe(true);
+    expect((await call(client, syntheticA, "global__mutate", {
+      web_session_id: sessionKeyFromOpenAiMetadata(meta(syntheticCoordinator)), value: "BAD",
+    })).isError).toBe(true);
+    expect((await call(client, syntheticCoordinator, "global__readonly_status")).isError).not.toBe(true);
+    await expect(client.listResources({ _meta: meta(syntheticA) })).rejects.toThrow();
+  } finally {
+    await client?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shared catalog mode rejects private external MCP configs, unknown modes and misleading policies", () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-shared-policy-validation-"));
+  try {
+    const privateServer = config(root, "P");
+    const base = {
+      version: 1, default_policy: "legacy", catalog_mode: "shared",
+      profiles: { test: { version: 1, native_tools: [], external_tools: ["fixture__readonly_status"] } },
+      session_bindings: {},
+    };
+    expect(parseSessionCapabilityConfig(base, join(root, "test.json")).catalogMode).toBe("shared");
+    expect(() => parseSessionCapabilityConfig({ ...base, catalog_mode: "invalid" }, join(root, "test.json")))
+      .toThrow("catalog_mode");
+    expect(() => parseSessionCapabilityConfig({ ...base, profiles: { test: {
+      version: 1, native_tools: [], external_tools: ["fixture__readonly_status"],
+      external_mcp_config: privateServer,
+    } } }, join(root, "test.json"))).toThrow("cannot launch session-private external MCP");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real MCP stdio: per-session catalog and dispatch deny cross-session, native and global tools", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-session-policy-"));
   const profileA = config(root, "A");

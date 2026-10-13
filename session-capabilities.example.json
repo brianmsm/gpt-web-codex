@@ -16,5 +16,6 @@
       "external_tools": []
     }
   },
-  "session_bindings": {}
+  "session_bindings": {},
+  "catalog_mode": "shared"
 }

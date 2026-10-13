@@ -69,6 +69,7 @@ test("generic CLI can inspect and bind profiles without exposing third-party MCP
     const summary = JSON.parse(check.stdout.toString()) as Record<string, unknown>;
     expect(summary).toMatchObject({
       default_policy: "legacy",
+      catalog_mode: "per_session",
       configured_sessions: 0,
       live_client_discovery_verified: false,
     });
@@ -108,6 +109,7 @@ test("the published example is a valid generic policy without external project f
   const example = join(import.meta.dir, "..", "session-capabilities.example.json");
   const parsed = parseSessionCapabilityConfig(JSON.parse(readFileSync(example, "utf8")), example);
   expect(parsed.defaultPolicy).toBe("legacy");
+  expect(parsed.catalogMode).toBe("shared");
   expect(parsed.profiles.has("no-tools")).toBe(true);
   expect(parsed.profiles.has("diagnostics-only")).toBe(true);
   expect(parsed.bindings.size).toBe(0);
