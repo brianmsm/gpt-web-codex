@@ -116,6 +116,12 @@ The native read-only tool `external_mcp_status` reports sanitized state for each
 
 Startup and calls have independent timeouts. Stdio children created by GWC are owned by GWC and are closed on GWC shutdown; the SDK escalates from stdin close to bounded termination when necessary. Streamable HTTP clients are closed, but GWC never attempts to kill the remote HTTP server.
 
+## Optional per-conversation capability profiles
+
+The ordinary external bridge above is process-wide by default. For cases requiring exact tool permissions per conversation and separately launched external stdio servers, GWC has an experimental, opt-in **Session Capability Profiles** subsystem. It is configured in a separate file and leaves the existing global `external-mcp.json` untouched. See [Session Capability Profiles](session-capabilities.md) and the [generic operator guide](session-capabilities-operations.md) to distinguish reusable GWC tool-name enforcement from OS sandboxing and synthetic test fixtures.
+
+The profile system limits GWC-side operations only; authoritative ChatGPT session metadata, client-side tool-list refresh, and other platform tools require separate verification.
+
 ## Chrome DevTools MCP as an example
 
 Chrome DevTools MCP is not part of the bridge architecture and is not a GWC dependency. It can be configured like any other stdio MCP after choosing and testing an exact package version:
@@ -144,3 +150,5 @@ Chrome DevTools MCP is not part of the bridge architecture and is not a GWC depe
 ```
 
 Keep the package version and connection flags explicit. Browser compatibility and the actual tool names belong to the third-party MCP version being used; the GWC bridge does not hardcode them.
+
+For Linux installations, see the [optional dedicated Chromium profile and systemd wake guide](chrome-browser.md). The Chrome wrapper can wake a user-owned browser on the first authorized tool call without altering generic MCP behavior or bypassing Session Capability Profiles.
