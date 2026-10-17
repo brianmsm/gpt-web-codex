@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import sharp from "sharp";
 import { buildCodexInvocation } from "../src/standalone/codex-command";
 import { DirectToolService, resolveScopedPath } from "../src/standalone/direct-tools";
@@ -50,13 +50,26 @@ function completedCodexProcess(cwd: string, lunaSessionId?: string, delayMs = 10
   return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
 }
 
-async function inspectBindingThroughFreshMcp(statePath: string, webSessionId: string) {
-  const transport = new StdioClientTransport({
+// Every MCP subprocess here is intentionally isolated from the operator's
+// global Chrome/external MCP servers and real conversation capability policy.
+// Otherwise tools/list changes and slow live server startup corrupt these
+// deterministic fixture assertions on a machine with an installed GWC.
+function testMcpTransport(statePath: string): StdioClientTransport {
+  const fixtureRoot = dirname(statePath);
+  return new StdioClientTransport({
     command: process.execPath,
     args: ["src/cli.ts", "mcp", "--state-path", statePath],
     cwd: process.cwd(),
     stderr: "pipe",
+    env: {
+      ...getDefaultEnvironment(),
+      CODEX_CHATGPT_WEB_EXTERNAL_MCP_CONFIG: join(fixtureRoot, "external-mcp-not-configured.json"),
+    },
   });
+}
+
+async function inspectBindingThroughFreshMcp(statePath: string, webSessionId: string) {
+  const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-persistence-test", version: "1.0.0" });
   try {
     await client.connect(transport);
@@ -371,9 +384,7 @@ test("Luna reacquisition is session-scoped and restart ambiguity is public", asy
   store.putJob({ ...sampleJob(root), id: jobId, webSessionId: sessionA, status: "running" });
   const client = new Client({ name: "webgpt-wave4-scope-test", version: "1.0.0" });
   try {
-    await client.connect(new StdioClientTransport({
-      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
-    }));
+    await client.connect(testMcpTransport(statePath));
     const sameSession = await client.callTool({
       name: "codexluna_status", arguments: { web_session_id: sessionA, job_id: jobId },
     });
@@ -420,9 +431,7 @@ test("openai/session is authoritative over explicit web_session_id across Luna r
   const mismatchMeta = { "openai/session": openAiSessionB };
   const mismatchMessage = "authoritative ChatGPT openai/session metadata";
   try {
-    await client.connect(new StdioClientTransport({
-      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
-    }));
+    await client.connect(testMcpTransport(statePath));
 
     const mismatchedInit = await client.callTool({
       name: "codexluna_init",
@@ -519,9 +528,7 @@ test("last_job_id is latest-job information, not reacquisition identity for an e
 
   const client = new Client({ name: "webgpt-wave4-last-job-test", version: "1.0.0" });
   try {
-    await client.connect(new StdioClientTransport({
-      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
-    }));
+    await client.connect(testMcpTransport(statePath));
     const session = await client.callTool({ name: "codexluna_session", arguments: { web_session_id: webSessionId } });
     expect(session.isError).not.toBe(true);
     expect(session.structuredContent).toMatchObject({
@@ -762,12 +769,7 @@ test("equivalent terminal starts remain independent local jobs", async () => {
 test("direct terminal jobs are isolated by authoritative web session ownership", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-terminal-session-owner-"));
   const statePath = join(root, "state.json");
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/cli.ts", "mcp", "--state-path", statePath],
-    cwd: process.cwd(),
-    stderr: "pipe",
-  });
+  const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-terminal-session-test", version: "1.0.0" });
   const sessionA = "terminal-owner-a";
   const sessionB = "terminal-owner-b";
@@ -847,12 +849,7 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
 
 test("standalone MCP exposes Luna direct and Herdr tools without a turn broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "webgpt-mcp-"));
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/cli.ts", "mcp", "--state-path", join(root, "state.json")],
-    cwd: process.cwd(),
-    stderr: "pipe",
-  });
+  const transport = testMcpTransport(join(root, "state.json"));
   const client = new Client({ name: "webgpt-standalone-test", version: "1.0.0" });
   try {
     await client.connect(transport);
@@ -1216,9 +1213,7 @@ test("completed Luna status does not recommend an intermediate-only image", asyn
   store.putJob(storedJob);
   const client = new Client({ name: "webgpt-luna-intermediate-status-test", version: "1.0.0" });
   try {
-    await client.connect(new StdioClientTransport({
-      command: process.execPath, args: ["src/cli.ts", "mcp", "--state-path", statePath], cwd: process.cwd(), stderr: "pipe",
-    }));
+    await client.connect(testMcpTransport(statePath));
     const output = await client.callTool({ name: "codexluna_status", arguments: { web_session_id: storedJob.webSessionId, job_id: storedJob.id } });
     expect(output.isError).not.toBe(true);
     expect(output.structuredContent).toMatchObject({
@@ -1248,12 +1243,7 @@ test("completed Luna image status returns native image content without binding i
     fast: true, timeoutMs: 900_000, sessionPolicyVersion: 1,
   });
   store.putJob(storedJob);
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/cli.ts", "mcp", "--state-path", statePath],
-    cwd: process.cwd(),
-    stderr: "pipe",
-  });
+  const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-luna-image-status-test", version: "1.0.0" });
   try {
     await client.connect(transport);
@@ -1348,12 +1338,7 @@ test("standalone MCP file_read transmits an image content block without base64 d
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
   const statePath = join(root, "state.json");
   writeFileSync(join(root, "pixel.png"), image);
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/cli.ts", "mcp", "--state-path", statePath],
-    cwd: process.cwd(),
-    stderr: "pipe",
-  });
+  const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-image-test", version: "1.0.0" });
   try {
     await client.connect(transport);
@@ -1446,12 +1431,7 @@ test("image preview restore survives an MCP process restart without the source f
   let secondClient: Client | undefined;
   try {
     firstClient = new Client({ name: "webgpt-image-cache-writer", version: "1.0.0" });
-    await firstClient.connect(new StdioClientTransport({
-      command: process.execPath,
-      args: ["src/cli.ts", "mcp", "--state-path", statePath],
-      cwd: process.cwd(),
-      stderr: "pipe",
-    }));
+    await firstClient.connect(testMcpTransport(statePath));
     const rendered = await firstClient.callTool({
       name: "file_image_preview",
       arguments: { path: imagePath, workspace_path: root, permission_mode: "read-only" },
@@ -1462,12 +1442,7 @@ test("image preview restore survives an MCP process restart without the source f
     rmSync(imagePath, { force: true });
 
     secondClient = new Client({ name: "webgpt-image-cache-reader", version: "1.0.0" });
-    await secondClient.connect(new StdioClientTransport({
-      command: process.execPath,
-      args: ["src/cli.ts", "mcp", "--state-path", statePath],
-      cwd: process.cwd(),
-      stderr: "pipe",
-    }));
+    await secondClient.connect(testMcpTransport(statePath));
     const restored = await secondClient.callTool({
       name: "file_image_preview_restore",
       arguments: { preview_id: previewId },
@@ -1492,12 +1467,7 @@ test("structured tool results are not duplicated into text content", async () =>
   const statePath = join(root, "state.json");
   const marker = "STRUCTURED_ONLY_MARKER_".repeat(2_000);
   writeFileSync(join(root, "large.txt"), marker);
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/cli.ts", "mcp", "--state-path", statePath],
-    cwd: process.cwd(),
-    stderr: "pipe",
-  });
+  const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-structured-only-test", version: "1.0.0" });
   try {
     await client.connect(transport);

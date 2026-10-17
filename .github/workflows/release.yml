@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -74,6 +74,8 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -137,23 +139,27 @@ jobs:
             echo "checksums.txt is missing entries for:$missing" >&2
             exit 1
           fi
-      - name: Publish GitHub release
+      - name: Stage GitHub release as draft (manual review required)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mapfile -d '' release_files < <(find release-assets -type f -print0)
           test "${#release_files[@]}" -gt 0
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Never silently alter an already-public release or republish it.
+            existing_draft="$(gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+            if [ "$existing_draft" != true ]; then
+              echo "Refusing to overwrite a published release: $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
             gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
-            gh release edit "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft=false \
-              --latest
           else
             gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
+              --draft \
               --generate-notes
           fi

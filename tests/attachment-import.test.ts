@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -24,7 +25,7 @@ function workspace(): string {
   return root;
 }
 
-async function fixtureServer(body: Buffer, options: { redirect?: string; chunked?: boolean } = {}) {
+async function fixtureServer(body: Buffer, options: { redirect?: string; chunked?: boolean; listenHost?: string } = {}) {
   const server = http.createServer((_request, response) => {
     if (options.redirect) {
       response.writeHead(302, { Location: options.redirect });
@@ -42,7 +43,7 @@ async function fixtureServer(body: Buffer, options: { redirect?: string; chunked
       response.end(body);
     }
   });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>(resolve => server.listen(0, options.listenHost ?? "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("fixture server did not bind a TCP port");
   return {
@@ -268,7 +269,10 @@ test("redirects are revalidated and streamed size failures remove partial files"
 
 test("pins the validated DNS result used by the actual request", async () => {
   const root = workspace();
-  const fixture = await fixtureServer(png);
+  // localhost may resolve to ::1 before 127.0.0.1. Bind the fixture to
+  // the same first address that production DNS pinning will validate.
+  const records = await lookup("localhost", { all: true, verbatim: true });
+  const fixture = await fixtureServer(png, { listenHost: records[0]?.address ?? "127.0.0.1" });
   try {
     const result = await importChatGptAttachment({
       file: { download_url: fixture.localhostUrl, file_id: "file_dns_pin", mime_type: "image/png" },

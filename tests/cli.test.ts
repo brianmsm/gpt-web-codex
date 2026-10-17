@@ -15,7 +15,9 @@ test("public CLI describes only the standalone GPT Web Codex surface", async () 
   const result = await runCli(["--help"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("gpt-web-codex");
-  expect(result.stdout).toContain("standalone Luna execution");
+  expect(result.stdout).toContain("Shell-first ChatGPT MCP bridge");
+  expect(result.stdout).toContain("persistent Herdr shells");
+  expect(result.stdout).toContain("optional Codex Luna");
   for (const retired of [" serve", " service ", " route", "uninstall", "Responses port"]) {
     expect(result.stdout).not.toContain(retired);
   }

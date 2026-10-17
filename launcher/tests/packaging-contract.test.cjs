@@ -92,7 +92,12 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.3\.14/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /GPT Web Codex\.app/);
-  assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
+  // Publication now stages a draft until the maintainer reviews the assets.
+  assert.match(release, /permissions:\s*contents: read/);
+  assert.match(release, /publish:[\s\S]*?permissions:\s*contents: write/);
+  assert.match(release, /gh release create[\s\S]*?--draft/);
+  assert.match(release, /existing_draft/);
+  assert.doesNotMatch(release, /--draft=false|--latest/);
 });
 
 test("release publishes the repository demo as a checksummed versioned asset", () => {

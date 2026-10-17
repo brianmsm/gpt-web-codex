@@ -19,6 +19,7 @@ function childEnv(extra: Record<string, string> = {}): Record<string, string> {
     if (typeof value === "string") env[key] = value;
   }
   delete env[MCP_TRACE_FILE_ENV];
+  delete env.CODEX_CHATGPT_WEB_SESSION_CAPABILITIES_CONFIG;
   return { ...env, ...extra };
 }
 
@@ -27,7 +28,12 @@ async function connectClient(root: string, env: Record<string, string>) {
     command: process.execPath,
     args: ["src/cli.ts", "mcp", "--state-path", join(root, "state.json")],
     cwd: process.cwd(),
-    env,
+    // Tests must never inherit the operator's live external MCP and
+    // conversation capability policy from a running GWC installation.
+    env: {
+      ...env,
+      CODEX_CHATGPT_WEB_EXTERNAL_MCP_CONFIG: join(root, "external-mcp-not-configured.json"),
+    },
     stderr: "pipe",
   });
   const client = new Client({ name: "mcp-request-trace-test", version: "1.0.0" });

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="${CODEX_WEB_GPT_REPOSITORY:-m4j2rpf766-crypto/gpt-web-codex}"
+REPOSITORY="${CODEX_WEB_GPT_REPOSITORY:-brianmsm/gpt-web-codex}"
 VERSION="${CODEX_WEB_GPT_VERSION:-}"
 OS="$(uname -s)"
 MACHINE="$(uname -m)"
@@ -173,7 +173,7 @@ cat > "$APPLICATIONS_DIR/gpt-web-codex.desktop" <<EOF
 Type=Application
 Version=1.0
 Name=GPT Web Codex
-Comment=ChatGPT Web planning with standalone Luna execution
+Comment=Shell-first ChatGPT MCP bridge with persistent Herdr terminals
 Exec="$DESKTOP_WRAPPER"
 Icon=gpt-web-codex
 Terminal=false

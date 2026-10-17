@@ -14,7 +14,7 @@ import { VERSION } from "./version";
 
 const HELP = `gpt-web-codex ${VERSION}
 
-ChatGPT Web planning with standalone Luna execution and local MCP tools.
+Shell-first ChatGPT MCP bridge with direct tools, persistent Herdr shells and optional Codex Luna.
 
 Usage:
   gpt-web-codex setup --full --mcp-only --tunnel-id ID --runtime-key-file PATH [options]
