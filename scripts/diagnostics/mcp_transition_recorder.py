@@ -22,12 +22,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-DEFAULT_HEALTH_URL_FILE = Path(
-    "/home/brian/.local/state/tunnel-client/health/codex-chatgpt-web.url"
-)
-DEFAULT_TUNNEL_LOG = Path(
-    "/home/brian/.local/state/tunnel-client/logs/codex-chatgpt-web.log"
-)
+# XDG-style defaults follow the current invoking user's HOME. Operators may
+# override these on the command line in their own local environment.
+DEFAULT_HEALTH_URL_FILE = Path.home() / ".local/state/tunnel-client/health/codex-chatgpt-web.url"
+DEFAULT_TUNNEL_LOG = Path.home() / ".local/state/tunnel-client/logs/codex-chatgpt-web.log"
 TARGET_INTERFACES = ("wlp99s0", "proton0", "pvpnksintrf0")
 MIN_KILL_SWITCH_WINDOW_MS = 2_000
 MIN_KILL_SWITCH_UNREACHABLE_SAMPLES = 2
