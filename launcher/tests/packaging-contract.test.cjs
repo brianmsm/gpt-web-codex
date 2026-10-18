@@ -95,9 +95,14 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   // Publication now stages a draft until the maintainer reviews the assets.
   assert.match(release, /permissions:\s*contents: read/);
   assert.match(release, /publish:[\s\S]*?permissions:\s*contents: write/);
-  assert.match(release, /gh release create[\s\S]*?--draft/);
-  assert.match(release, /existing_draft/);
-  assert.doesNotMatch(release, /--draft=false|--latest/);
+  const stageDraft = fs.readFileSync(path.join(repositoryRoot, "scripts", "stage-release-draft.sh"), "utf8");
+  assert.match(release, /bash scripts\/stage-release-draft\.sh release-assets/);
+  assert.match(stageDraft, /Refusing existing GitHub Release/);
+  assert.match(stageDraft, /gh release create/);
+  assert.match(stageDraft, /--verify-tag/);
+  assert.match(stageDraft, /--draft/);
+  assert.match(stageDraft, /DRAFT_STAGED_ASSET_INVENTORY_VERIFIED/);
+  assert.doesNotMatch(stageDraft, /gh release upload|--draft=false|--latest/);
 });
 
 test("release publishes the repository demo as a checksummed versioned asset", () => {
