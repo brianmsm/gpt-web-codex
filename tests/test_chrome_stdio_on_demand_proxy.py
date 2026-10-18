@@ -48,25 +48,40 @@ class ChromeOnDemandProxyTests(TestCase):
         self.assertNotIn("secret-id",parsed["result"]["content"][0]["text"])
         self.assertIn("NOT",parsed["result"]["content"][0]["text"].upper())
 
-    def test_if_cdp_ready_controller_not_invoked(self) -> None:
-        with patch.object(m,"cdp_ready",return_value=True),patch.object(m.subprocess,"run") as sub:
+    def test_valid_cdp_must_still_obtain_owned_profile_attestation(self) -> None:
+        with (patch.object(m,"cdp_ready",return_value=True),
+              patch.object(m,"_controlled_browser_check",return_value=True) as check):
             self.assertTrue(m.wake_browser())
-            sub.assert_not_called()
+            check.assert_called_once_with("--check-owned",timeout=8)
+
+    def test_foreign_valid_cdp_is_rejected_without_running_browser_operation(self) -> None:
+        with (patch.object(m,"cdp_ready",return_value=True),
+              patch.object(m,"_controlled_browser_check",return_value=False) as check):
+            self.assertFalse(m.wake_browser())
+            check.assert_called_once_with("--check-owned",timeout=8)
 
     def test_if_service_unavailable_never_attempts_browser_operation(self) -> None:
         with patch.object(m,"cdp_ready",return_value=False),patch.object(m,"CONTROL",Path("/tmp/gwc-auto-wake-proxy-definitely-missing-controller")):
             self.assertFalse(m.wake_browser())
 
-    def test_controlled_wake_is_bounded_and_has_no_terminal_stdout(self) -> None:
+    def test_controlled_wake_is_bounded_and_requires_poststart_attestation(self) -> None:
         with (patch.object(m,"cdp_ready",side_effect=[False,True]),
               patch.object(m.subprocess,"run") as sub):
             sub.return_value.returncode=0
             self.assertTrue(m.wake_browser())
-            args, kwargs=sub.call_args
-            self.assertEqual(args[0],["/usr/bin/python3","-B",str(m.CONTROL),"--start"])
-            self.assertEqual(kwargs["timeout"],m.WAKE_TIMEOUT)
-            self.assertEqual(kwargs["stdout"],m.subprocess.DEVNULL)
-            self.assertEqual(kwargs["stderr"],m.subprocess.DEVNULL)
+            self.assertEqual(sub.call_count,2)
+            self.assertEqual([call.args[0][-1] for call in sub.call_args_list],
+                             ["--start","--check-owned"])
+            self.assertEqual(sub.call_args_list[0].kwargs["timeout"],m.WAKE_TIMEOUT)
+            for call in sub.call_args_list:
+                self.assertEqual(call.kwargs["stdout"],m.subprocess.DEVNULL)
+                self.assertEqual(call.kwargs["stderr"],m.subprocess.DEVNULL)
+
+    def test_if_controller_refuses_owned_cdp_wake_fails_even_after_start(self) -> None:
+        with (patch.object(m,"cdp_ready",side_effect=[False,True]),
+              patch.object(m,"_controlled_browser_check",side_effect=[True,False]) as check):
+            self.assertFalse(m.wake_browser())
+            self.assertEqual(check.call_count,2)
 
     def test_output_relay_is_exact_byte_transport(self) -> None:
         data=b'{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"test"}]}}\n'

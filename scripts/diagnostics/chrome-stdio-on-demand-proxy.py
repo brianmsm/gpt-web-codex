@@ -61,26 +61,36 @@ def cdp_ready() -> bool:
         return False
 
 
-def wake_browser() -> bool:
-    if cdp_ready():
-        return True
+def _controlled_browser_check(action: str, timeout: int) -> bool:
+    # Never accept the remote CDP /json/version as an identity claim.
+    # The private controller verifies the active systemd service, profile,
+    # service cgroup, and OS socket listener before authorizing the bridge.
     if CONTROL.is_symlink() or not CONTROL.is_file():
         return False
-    st = CONTROL.stat()
-    if st.st_uid != os.getuid() or st.st_mode & 0o077:
-        return False
     try:
+        st = CONTROL.stat()
+        if st.st_uid != os.getuid() or st.st_mode & 0o077:
+            return False
         result = subprocess.run(
-            ["/usr/bin/python3", "-B", str(CONTROL), "--start"],
+            ["/usr/bin/python3", "-B", str(CONTROL), action],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=WAKE_TIMEOUT,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0 and cdp_ready()
+    return result.returncode == 0
+
+
+def wake_browser() -> bool:
+    if cdp_ready():
+        # A random Chrome on :9333 must not be trusted, even if it is valid CDP.
+        return _controlled_browser_check("--check-owned", timeout=8)
+    if not _controlled_browser_check("--start", timeout=WAKE_TIMEOUT):
+        return False
+    return cdp_ready() and _controlled_browser_check("--check-owned", timeout=8)
 
 
 def parse_tool_call(line: bytes) -> tuple[bool, object]:

@@ -28,7 +28,7 @@ The service remains **disabled at login** by design. Wake it explicitly:
 python3 -B "$HOME/.local/state/gwc-agent-browser/control.py" --start
 ```
 
-The controller checks that its private files are owned by the invoking user and waits until CDP is ready. It refuses to take over an unexpected process already using port `9333`. If Chromium was launched manually, it reports that the existing browser is not systemd-managed. This example is intended for a normal user graphical session, not a root/system service.
+The controller checks private file ownership, the **loaded systemd ExecStart**, browser-service MainPID/OS user, the exact dedicated profile and flags, and Linux kernel ownership of the loopback CDP listening socket. A browser-shaped `/json/version` response **does not establish identity**. It refuses any foreign or manually started Chrome already using port `9333`, even if that Chrome has a valid CDP endpoint. Close the non-managed instance yourself (after saving work) and wake the dedicated service instead. The check is not an OS security boundary against a hostile process running as the same local user.
 
 ## Optional MCP auto-wake
 
@@ -70,7 +70,9 @@ The corresponding `external-mcp.json` entry is:
 
 Replace the placeholder with the real absolute path to this checkout; never put a private runtime key in `args` or `env`. The wrapper validates its pinned arguments. The backend process only connects to the dedicated profile; it does not launch a Puppeteer-controlled user-profile browser.
 
-If the browser is closed, the wrapper attempts the private systemd wake action **before forwarding** `tools/call`. A failed wake returns a tool error without executing the browser request. It never blindly replays a browser operation after an uncertain outcome.
+If the browser is closed, the wrapper attempts the private systemd wake action **before forwarding** `tools/call`. Even if CDP is already reachable, it first requires a positive `--check-owned` attestation from the private controller; merely finding a Chrome on port `9333` is insufficient. A failed ownership check or wake returns a tool error without executing the browser request. It never blindly replays a browser operation after an uncertain outcome.
+
+**Existing installations:** this stricter version must be deployed together with its matching private controller and systemd unit. The controller deliberately refuses to overwrite differing previously installed private scripts/units. Plan a supervised backup and upgrade of those files, without deleting your Chromium profile or modifying a running protected GWC tunnel. An older installed controller does not satisfy the new ownership attestation and the new wrapper will fail closed until the upgrade is performed.
 
 External MCP startup catalogs are initialized when the GWC process starts, so changing `external-mcp.json` requires a **controlled restart** of your own runtime. Do not copy private tunnel IDs, runtime keys, protected profile paths or operator-specific backup procedures from other environments.
 

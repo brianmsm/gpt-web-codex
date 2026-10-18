@@ -9,12 +9,17 @@ or Chrome MCP registry are necessary for explicit wake via GWC terminal_exec.
 --status     Print whether port/CDP and service are ready.
 --start      Start the user service on demand and wait for CDP.
 --port-free  Internal systemd ExecCondition; skip if another process owns 9333.
+--check-owned  Exit 0 only for the managed GWC Agent profile/port/OS socket.
+
+Manual or otherwise unowned CDP listeners are refused (fail closed).
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import re
+import shlex
 import os
 from pathlib import Path
 import socket
@@ -22,6 +27,7 @@ import subprocess
 import sys
 import time
 from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 HOME = Path.home()
 PROFILE = HOME / ".local/share/gwc-browser-agent"
@@ -30,7 +36,9 @@ LOCAL_CONTROLLER = STORE / "control.py"
 SERVICE = HOME / ".config/systemd/user/gwc-agent-browser.service"
 UNIT = "gwc-agent-browser.service"
 BROWSER = Path("/usr/bin/chromium")
-URL = "http://127.0.0.1:9333/json/version"
+CDP_HOST = "127.0.0.1"
+CDP_PORT = 9333
+URL = f"http://{CDP_HOST}:{CDP_PORT}/json/version"
 UNIT_TEXT = """[Unit]
 Description=GWC Agent isolated Chromium (loopback CDP 9333)
 Documentation=https://github.com/brianmsm/gpt-web-codex/blob/main/docs/chrome-browser.md
@@ -102,14 +110,14 @@ def command(args: list[str], timeout: int = 12, allow_failure: bool = False) -> 
 
 
 def unit_status() -> dict[str, str]:
-    r = command(["systemctl", "--user", "show", UNIT, "--property=LoadState,ActiveState,SubState,Result,MainPID"], timeout=8)
+    r = command(["systemctl", "--user", "show", UNIT, "--property=LoadState,ActiveState,SubState,Result,MainPID,ExecStart,FragmentPath"], timeout=8)
     return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
 
 
 def port_taken() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.65)
-        return s.connect_ex(("127.0.0.1", 9333)) == 0
+        return s.connect_ex((CDP_HOST, CDP_PORT)) == 0
 
 
 def cdp_ok() -> bool:
@@ -118,8 +126,141 @@ def cdp_ok() -> bool:
             if r.status != 200:
                 return False
             payload = json.loads(r.read(16384))
-            return bool(payload.get("webSocketDebuggerUrl")) and payload.get("Browser", "").startswith("Chrome/")
+            if not str(payload.get("Browser", "")).startswith("Chrome/"):
+                return False
+            socket_url = urlsplit(str(payload.get("webSocketDebuggerUrl", "")))
+            return (
+                socket_url.scheme == "ws"
+                and socket_url.hostname == CDP_HOST
+                and socket_url.port == CDP_PORT
+                and socket_url.path.startswith("/devtools/browser/")
+                and not socket_url.username
+                and not socket_url.password
+                and not socket_url.fragment
+            )
     except Exception:
+        return False
+
+
+def _cdp_listener_inodes(proc_root: Path = Path("/proc")) -> set[str]:
+    """Accept exactly one IPv4 listener bound to 127.0.0.1:9333.
+
+    A wildcard listener or another IPv6 listener on the same port is rejected.
+    Socket inodes, unlike JSON version strings, identify kernel resources.
+    """
+    matched: set[str] = set()
+    for family in ("tcp", "tcp6"):
+        try:
+            lines = (proc_root / "net" / family).read_text().splitlines()[1:]
+        except (OSError, UnicodeError):
+            return set()
+        for line in lines:
+            cols = line.split()
+            if len(cols) < 10 or cols[3] != "0A":
+                continue
+            host, separator, port = cols[1].upper().partition(":")
+            if separator != ":" or port != f"{CDP_PORT:04X}":
+                continue
+            if family != "tcp" or host != "0100007F":
+                return set()
+            if not cols[9].isdigit() or cols[9] == "0":
+                return set()
+            matched.add(cols[9])
+    return matched if len(matched) == 1 else set()
+
+
+def _verified_service_argv(status: dict[str, str]) -> list[str] | None:
+    """Use systemd's recorded ExecStart, not Chromium's mutable process title."""
+    if status.get("FragmentPath") != str(SERVICE):
+        return None
+    try:
+        if SERVICE.is_symlink() or not SERVICE.is_file():
+            return None
+        fs = SERVICE.stat()
+        if fs.st_uid != os.getuid() or fs.st_mode & 0o077:
+            return None
+        # Fail closed if an old or mutated unit is installed: re-installing a
+        # reviewed service must be an explicit administrator-controlled action.
+        if SERVICE.read_bytes() != UNIT_TEXT.encode():
+            return None
+    except OSError:
+        return None
+    config = status.get("ExecStart", "")
+    if config.count("argv[]=") != 1:
+        return None
+    raw = config.split("argv[]=", 1)[1].split(" ;", 1)[0].strip()
+    try:
+        argv = shlex.split(raw)
+    except ValueError:
+        return None
+    if not argv or argv[0] != str(BROWSER):
+        return None
+    required = (
+        f"--user-data-dir={PROFILE}",
+        f"--remote-debugging-address={CDP_HOST}",
+        f"--remote-debugging-port={CDP_PORT}",
+    )
+    if any(argv.count(arg) != 1 for arg in required):
+        return None
+    for name in ("--user-data-dir", "--remote-debugging-address",
+                 "--remote-debugging-port"):
+        if sum(arg == name or arg.startswith(name + "=") for arg in argv) != 1:
+            return None
+    return argv
+
+
+def _owned_listener_process(status: dict[str, str],
+                            proc_root: Path = Path("/proc")) -> bool:
+    """Match systemd process identity, its exact private unit and socket FD.
+
+    Chromium may overwrite /proc/PID/cmdline and migrate itself into a
+    graphical scope, so neither a mutable process title nor cgroup ancestry
+    is reliable. Instead, validate the trusted loaded ExecStart, active
+    MainPID, OS user and FD belonging to the loopback kernel listener.
+    This is not isolation from a malicious process with the same Linux UID.
+    """
+    if sys.platform != "linux":
+        return False
+    if status.get("LoadState") != "loaded" or status.get("ActiveState") != "active":
+        return False
+    if _verified_service_argv(status) is None:
+        return False
+    pid = status.get("MainPID", "")
+    if not pid.isdecimal() or int(pid) < 1:
+        return False
+    master = proc_root / pid
+    try:
+        if master.stat().st_uid != os.getuid():
+            return False
+        real_browser = Path(os.readlink(master / "exe")).name.lower()
+        if not real_browser.startswith(("chromium", "chrome")):
+            return False
+        inodes = _cdp_listener_inodes(proc_root)
+        if not inodes:
+            return False
+        # The systemd MainPID must own this exact kernel CDP socket, not an
+        # unrelated process with a plausible /json/version response.
+        for fd in (master / "fd").iterdir():
+            try:
+                dest = os.readlink(fd)
+            except OSError:
+                continue
+            if dest.startswith("socket:[") and dest.endswith("]"):
+                if dest[8:-1] in inodes:
+                    return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return False
+
+
+def owned_cdp_ready(status: dict[str, str] | None = None,
+                    proc_root: Path = Path("/proc")) -> bool:
+    """Reject any Chrome-shaped CDP listener without unit/profile ownership."""
+    try:
+        private_dir(PROFILE)
+        live = unit_status() if status is None else status
+        return _owned_listener_process(live, proc_root) and cdp_ok()
+    except (OSError, RuntimeError):
         return False
 
 
@@ -155,11 +296,13 @@ def install() -> None:
 
 def status() -> None:
     unit = unit_status()
-    print("GWC_AGENT_BROWSER_SYSTEMD_STATE="+unit.get("ActiveState", "unknown"))
-    print("GWC_AGENT_BROWSER_CDP_READY="+str(cdp_ok()).lower())
-    print("GWC_AGENT_BROWSER_PORT_IN_USE="+str(port_taken()).lower())
-    print("GWC_AGENT_BROWSER_OWNER_MODE="+(
-        "systemd" if unit.get("ActiveState")=="active" else "external_manual" if cdp_ok() else "stopped"))
+    owned = owned_cdp_ready(unit)
+    occupied = port_taken()
+    print("GWC_AGENT_BROWSER_SYSTEMD_STATE=" + unit.get("ActiveState", "unknown"))
+    print("GWC_AGENT_BROWSER_CDP_READY=" + str(owned).lower())
+    print("GWC_AGENT_BROWSER_PORT_IN_USE=" + str(occupied).lower())
+    print("GWC_AGENT_BROWSER_OWNER_MODE=" + (
+        "systemd" if owned else "untrusted_or_manual" if occupied else "stopped"))
 
 
 def wake() -> None:
@@ -167,27 +310,24 @@ def wake() -> None:
     unit = unit_status()
     if unit.get("LoadState") != "loaded":
         raise RuntimeError("GWC Agent browser service not installed")
-    if cdp_ok():
-        if unit.get("ActiveState")=="active":
-            print("GWC_AGENT_BROWSER_READY_SYSTEMD=YES")
-        else:
-            print("GWC_AGENT_BROWSER_READY_EXISTING_MANUAL=YES")
-            print("GWC_AGENT_BROWSER_MANAGED_BY_SYSTEMD=NO")
-        return
     if port_taken():
-        raise RuntimeError("CDP 9333 port is occupied by an unexpected service")
-    if unit.get("ActiveState")!="active":
+        if not owned_cdp_ready(unit):
+            raise RuntimeError("CDP port occupied by a foreign or unowned browser")
+        print("GWC_AGENT_BROWSER_READY_SYSTEMD=YES")
+        return
+    if unit.get("ActiveState") != "active":
         command(["systemctl", "--user", "start", UNIT], timeout=18)
-    until = time.monotonic()+25
-    while time.monotonic()<until:
-        if cdp_ok() and unit_status().get("ActiveState")=="active":
+    until = time.monotonic() + 25
+    while time.monotonic() < until:
+        unit = unit_status()
+        if owned_cdp_ready(unit):
             print("GWC_AGENT_BROWSER_READY_SYSTEMD=YES")
             print("GWC_AGENT_BROWSER_CDP_9333=HTTP_200")
             return
-        if unit_status().get("ActiveState") in ("failed","inactive"):
-            raise RuntimeError("User browser service stopped before CDP became available")
+        if unit.get("ActiveState") in ("failed", "inactive"):
+            raise RuntimeError("User browser service stopped before owned CDP became available")
         time.sleep(0.8)
-    raise RuntimeError("Browser service did not become ready within 25 seconds")
+    raise RuntimeError("Browser service did not prove owned CDP within 25 seconds")
 
 
 def main() -> None:
@@ -197,12 +337,17 @@ def main() -> None:
     group.add_argument("--status", action="store_true")
     group.add_argument("--start", action="store_true")
     group.add_argument("--port-free", action="store_true")
+    group.add_argument("--check-owned", action="store_true")
     opts = parser.parse_args()
     if opts.port_free:
         # systemd ExecCondition: exit 1-254 skips unit start without claiming
         # or perturbing an existing manually-started browser profile.
         private_dir(PROFILE)
         if port_taken():
+            sys.exit(1)
+        return
+    if opts.check_owned:
+        if not owned_cdp_ready():
             sys.exit(1)
         return
     if opts.install:
