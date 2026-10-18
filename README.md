@@ -11,6 +11,8 @@ GPT Web Codex connects an ordinary ChatGPT conversation to tools running on **yo
 
 This is a substantially evolved fork of [m4j2rpf766-crypto/gpt-web-codex](https://github.com/m4j2rpf766-crypto/gpt-web-codex), itself based on [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web). Thanks to the original maintainers and contributors. This project is **not affiliated with or endorsed by OpenAI**.
 
+**Public history provenance:** the fork's v2.3.0 commit sequence was reconstructed from a larger local development history to exclude installation-specific operator diagnostics. It preserves meaningful code milestones and the original author identity/dates for reused work, but is **not** a verbatim or one-to-one copy of every development commit; reconstructed committer dates differ. Private operator material is not part of the public release history.
+
 > **Security warning:** This is a powerful local execution bridge, **not a hardened command sandbox**. A model using permitted shell tools can execute destructive commands, modify files outside the intended project, access secrets visible to the OS user, or send data over the network. There is **no general destructive-command blocklist or mandatory command-by-command human approval gate** for persistent shells. Do not expose it to untrusted users, prompts, or repositories; read [Security](#security-read-this-first) before connecting it.
 
 ## Why this fork?
@@ -149,6 +151,6 @@ bun run launcher:typecheck
 bun run launcher:test
 ```
 
-Version **v2.3.0** follows standard semantic versioning. See [CHANGELOG.md](CHANGELOG.md) for the fork's changes and validation scope. The release workflow first stages binary assets as a private **GitHub Release draft**. The maintainer must review its CI results, signatures and checksums before manually publishing. A source version/tag is not evidence that an installer has already been published.
+Version **v2.3.0** follows standard semantic versioning. See [CHANGELOG.md](CHANGELOG.md) for the fork's changes and validation scope. Before pushing any ref, follow the [privacy-curated release and tag preflight](docs/release-publication.md). The release workflow first stages binary assets as a private **GitHub Release draft**. The maintainer must review its CI results, signatures and checksums before manually publishing. A source version/tag is not evidence that an installer has already been published.
 
 Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md). The MIT license and required third-party notices are in [LICENSE](LICENSE) and [LICENSES](LICENSES).

@@ -26,4 +26,4 @@ See [Architecture](docs/architecture.md), [Herdr](docs/herdr.md), [External MCP]
 
 ## Versions and releases
 
-Use conventional Semantic Versioning: `vMAJOR.MINOR.PATCH`. An annotated Git tag is a source milestone, not a published binary release. Pushing `v*` triggers a GitHub Actions release workflow; package, launcher and CLI versions must agree before doing so.
+Use conventional Semantic Versioning: `vMAJOR.MINOR.PATCH`. An annotated Git tag is a source milestone, not a published binary release. Pushing `v*` triggers a GitHub Actions release workflow; package, launcher and CLI versions must agree before doing so. For public forks with private local experiments, follow [the privacy-curated release gate](docs/release-publication.md). Never bulk-push local tags or mirrors from a repository holding internal development refs.
