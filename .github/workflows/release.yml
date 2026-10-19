@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# Serializes this workflow's runs for the same repository/tag. It does not
+# exclude direct API clients, other workflows, or external release creators.
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
