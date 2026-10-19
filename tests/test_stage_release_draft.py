@@ -67,6 +67,8 @@ if args and args[0] == "api":
 if args[:2] == ["release", "view"]:
     if "--json" in args:
         print(os.environ.get("MOCK_POST_BODY", json.dumps(original)), end="")
+        if os.environ.get("MOCK_POST_SUFFIX_NUL") == "1":
+            sys.stdout.buffer.write(b"\x00")
         sys.exit(int(os.environ.get("MOCK_POST_EXIT", "0")))
     status = int(os.environ.get("MOCK_RELEASE_STATUS", "404"))
     if status == 200:
@@ -231,6 +233,12 @@ class DraftReleaseCliSafetyTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, f"index {index}: {result.stdout}")
                 self.assertNotIn("DRAFT_STAGED_ASSET_INVENTORY_VERIFIED", result.stdout)
                 self.assertEqual(count, 1, f"mock draft was already created: {index}")
+
+    def test_post_creation_nul_byte_is_rejected(self):
+        result, count, _ = self.invoke(MOCK_POST_SUFFIX_NUL=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("DRAFT_STAGED_ASSET_INVENTORY_VERIFIED", result.stdout)
+        self.assertEqual(count, 1)
 
     def test_post_creation_partial_output_plus_cli_failure_is_rejected(self):
         valid = json.dumps({"isDraft": True, "assets": [{"name": "good.zip"}, {"name": "checksums.txt"}]})

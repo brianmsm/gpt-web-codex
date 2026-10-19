@@ -12,11 +12,12 @@ const { createHash } = require("node:crypto");
 const script = path.resolve(__dirname, "../../scripts/stage-release-draft.sh");
 const runnable = process.platform !== "win32"
   && spawnSync("bash", ["-n", script]).status === 0
+  && spawnSync("python3", ["--version"]).status === 0
   && spawnSync("jq", ["--version"]).status === 0
   && spawnSync("sha256sum", ["--version"]).status === 0;
 
 function withFixture(options, check) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gwc-r3-draft-contract-"));
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gwc-r4-draft-contract-"));
   try {
     const bin = path.join(temp, "bin");
     const state = path.join(temp, "state");
@@ -29,27 +30,44 @@ function withFixture(options, check) {
     const mock = [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
-      'printf "%s\\n" "$*" >> "$MOCK_STATE_DIR/gh.log"',
-      'if [[ "${1:-}" != release ]]; then exit 98; fi',
-      'case "${2:-}" in',
+      "printf \"%s\\n\" \"$*\" >> \"$MOCK_STATE_DIR/gh.log\"",
+      "if [[ \"${1:-}\" == api ]]; then",
+      "  endpoint=\"${@: -1}\"",
+      "  case \"$endpoint\" in",
+      "    repos/example/gwc-test)",
+      "      printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{\"full_name\":\"example/gwc-test\",\"permissions\":{\"push\":true}}'",
+      "      exit 0 ;;",
+      "    \"repos/example/gwc-test/releases?per_page=1\")",
+      "      printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n[]'",
+      "      exit 0 ;;",
+      "    repos/example/gwc-test/releases/tags/v2.3.0)",
+      "      if [[ \"$MOCK_EXISTING_RELEASE\" == 1 || -f \"$MOCK_STATE_DIR/created\" ]]; then",
+      "        printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{\"tag_name\":\"v2.3.0\"}'",
+      "        exit 0",
+      "      fi",
+      "      printf 'HTTP/2.0 404 Not Found\\ncontent-type: application/json\\n\\n{\"message\":\"Not Found\",\"status\":\"404\"}'",
+      "      exit 1 ;;",
+      "    *) exit 98 ;;",
+      "  esac",
+      "fi",
+      "if [[ \"${1:-}\" != release ]]; then exit 98; fi",
+      "case \"${2:-}\" in",
       "  view)",
-      '    if [[ " $* " == *" --json "* ]]; then',
-      '      if [[ ! -f "$MOCK_STATE_DIR/created" ]]; then exit 91; fi',
-      '      case "$MOCK_REMOTE_CASE" in',
-      '        exact) printf \'{"isDraft":true,"assets":[{"name":"good.zip"},{"name":"checksums.txt"}]}\\n\' ;;',
-      '        stale) printf \'{"isDraft":true,"assets":[{"name":"good.zip"},{"name":"checksums.txt"},{"name":"stale.zip"}]}\\n\' ;;',
-      '        published) printf \'{"isDraft":false,"assets":[{"name":"good.zip"},{"name":"checksums.txt"}]}\\n\' ;;',
+      "    if [[ \" $* \" == *\" --json \"* ]]; then",
+      "      if [[ ! -f \"$MOCK_STATE_DIR/created\" ]]; then exit 91; fi",
+      "      case \"$MOCK_REMOTE_CASE\" in",
+      "        exact) printf '{\"isDraft\":true,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"}]}\\n' ;;",
+      "        stale) printf '{\"isDraft\":true,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"},{\"name\":\"stale.zip\"}]}\\n' ;;",
+      "        published) printf '{\"isDraft\":false,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"}]}\\n' ;;",
       "        *) exit 99 ;;",
       "      esac",
-      '    elif [[ "$MOCK_EXISTING_RELEASE" == 1 || -f "$MOCK_STATE_DIR/created" ]]; then',
-      "      exit 0",
       "    else",
-      "      exit 1",
+      "      exit 95",
       "    fi",
       "    ;;",
       "  create)",
-      '    if [[ "$MOCK_EXISTING_RELEASE" == 1 ]]; then exit 97; fi',
-      '    touch "$MOCK_STATE_DIR/created"',
+      "    if [[ \"$MOCK_EXISTING_RELEASE\" == 1 ]]; then exit 97; fi",
+      "    touch \"$MOCK_STATE_DIR/created\"",
       "    ;;",
       "  *) exit 96 ;;",
       "esac",
@@ -63,6 +81,8 @@ function withFixture(options, check) {
       MOCK_REMOTE_CASE: options.remote || "exact",
       GITHUB_REF_NAME: "v2.3.0",
       GITHUB_REPOSITORY: "example/gwc-test",
+      GH_TOKEN: "SYNTHETIC-LOCAL-ONLY",
+      GH_HOST: "github.com",
     };
     check({ temp, assets, env, state });
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
@@ -82,6 +102,7 @@ test("fresh tag creates a draft with exact checksummed assets", { skip: !runnabl
     const r = execute(ctx);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /DRAFT_STAGED_ASSET_INVENTORY_VERIFIED=2/);
+    assert.equal(r.events.filter(x => x.includes(" api ") || x.startsWith("api ")).length, 3);
     assert.ok(r.events.some(x => x.includes("release create") && x.includes("--verify-tag") && x.includes("--draft")));
     assert.ok(!r.events.some(x => x.includes("release upload")));
   });
@@ -105,7 +126,7 @@ test("unexpected post-create stale asset fails closed", { skip: !runnable }, () 
   withFixture({ remote: "stale" }, ctx => {
     const r = execute(ctx);
     assert.equal(r.status, 3, r.stderr);
-    assert.match(r.stderr, /Remote draft asset inventory differs/);
+    assert.match(r.stderr, /Remote release response is invalid or draft asset names differ/);
     assert.ok(!r.events.some(x => x.includes("release upload")));
   });
 });
@@ -113,7 +134,7 @@ test("non-draft response fails rather than claiming success", { skip: !runnable 
   withFixture({ remote: "published" }, ctx => {
     const r = execute(ctx);
     assert.equal(r.status, 3);
-    assert.match(r.stderr, /Expected a draft/);
+    assert.match(r.stderr, /Remote release response is invalid or draft asset names differ/);
   });
 });
 test("unchecksummed local asset is rejected before GitHub access", { skip: !runnable }, () => {

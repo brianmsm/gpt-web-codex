@@ -209,14 +209,20 @@ gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
 
 # A green job requires an exact remotely observed asset list. A failed
 # verification leaves the release in *draft* state for manual examination.
-remote_json="$(gh release view "$GITHUB_REF_NAME" \
-  --repo "github.com/$GITHUB_REPOSITORY" --json isDraft,assets)"
-# The entire gh reply must be exactly one parseable JSON object. `--slurp`
-# parses the *whole* stream before assessing our predicate; checking jq's exit
-# code directly prevents partial output from being mistaken for success.
+# Read directly into a file to preserve NUL bytes and all trailing data.
+# A command substitution would silently drop NULs; gh must also exit cleanly
+# even if it printed a complete-looking object before an error.
+postflight="$api_dir/postflight.json"
+if ! gh release view "$GITHUB_REF_NAME" \
+  --repo "github.com/$GITHUB_REPOSITORY" --json isDraft,assets >"$postflight"; then
+  echo "GitHub Release postflight failed; draft requires manual review" >&2
+  exit 3
+fi
+# The entire reply must be exactly one parseable JSON object. `--slurp`
+# parses the *whole* stream before assessing our predicate; jq's exit code
+# is checked directly, as is the strict JSON parser's own exit code.
 expected_json="$(jq -cn '$ARGS.positional' --args "${expected_names[@]}")"
-printf '%s' "$remote_json" >"$api_dir/postflight.json"
-if ! strict_json_file "$api_dir/postflight.json" \
+if ! strict_json_file "$postflight" \
    || ! jq --slurp -e --argjson expected "$expected_json" '
     length == 1 and (.[0] | type == "object") and
     (.[0].isDraft | type == "boolean") and (.[0].isDraft == true) and
@@ -229,7 +235,7 @@ if ! strict_json_file "$api_dir/postflight.json" \
     ((.[0].assets | map(.name | ascii_downcase) | unique | length)
       == (.[0].assets | length)) and
     ((.[0].assets | map(.name) | sort) == ($expected | sort))
-  ' <<<"$remote_json" >/dev/null; then
+  ' "$postflight" >/dev/null; then
   echo "Remote release response is invalid or draft asset names differ" >&2
   exit 3
 fi
