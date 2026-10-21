@@ -91,7 +91,7 @@ Official instructions: [Connecting custom MCP servers in ChatGPT](https://help.o
 
 Herdr is an **optional separate application**. GWC bridges to its session/socket and addresses explicit workspace, tab and pane IDs rather than imitating keystrokes in an arbitrary window.
 
-1. Install and start Herdr, then confirm `herdr session list --json` works. The tested integration targets **Herdr 0.8.2 / Socket API protocol 20**.
+1. Install and start Herdr, then confirm `herdr session list --json` works. The tested integration targets **Herdr 0.8.2 / Socket API protocol 20** and **Herdr 0.9.1 / Socket API protocol 22**; other versions remain blocked until validated.
 2. In a ChatGPT conversation, ask GWC to open an **authorized local workspace in Herdr** and run a non-destructive command in its pane.
 3. Inspect or attach to the same session in Herdr. The terminal process remains visible and can be reacquired after the ChatGPT reply finishes or GWC reconnects.
 

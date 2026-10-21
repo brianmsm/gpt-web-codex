@@ -9,7 +9,10 @@ import { normalizeHerdrSpecialKey } from "./herdr-keys";
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
-const SUPPORTED_PROTOCOL = 20;
+// Explicitly validated Socket API generations. Do not accept unknown revisions:
+// requests with changed semantics could otherwise act on unrelated Herdr panes.
+const SUPPORTED_PROTOCOLS = new Set([20, 22]);
+const SUPPORTED_PROTOCOLS_LABEL = "20 or 22";
 
 export type HerdrHealth = "healthy" | "failed" | "unknown" | "not_found";
 
@@ -264,12 +267,12 @@ export class HerdrClient {
         const pong = await this.pingSession(session);
         return {
           ...this.publicSession(session),
-          health: pong.protocol === SUPPORTED_PROTOCOL ? "healthy" as const : "failed" as const,
+          health: SUPPORTED_PROTOCOLS.has(pong.protocol) ? "healthy" as const : "failed" as const,
           version: pong.version,
           protocol: pong.protocol,
-          error: pong.protocol === SUPPORTED_PROTOCOL
+          error: SUPPORTED_PROTOCOLS.has(pong.protocol)
             ? null
-            : `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOL}`,
+            : `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOLS_LABEL}`,
         };
       } catch (error) {
         const known = this.normalizeError(error);
@@ -574,9 +577,9 @@ export class HerdrClient {
 
   private async probeProtocol(session: HerdrSessionInfo): Promise<{ version: string; protocol: number }> {
     const pong = await this.pingSession(session);
-    if (pong.protocol !== SUPPORTED_PROTOCOL) {
+    if (!SUPPORTED_PROTOCOLS.has(pong.protocol)) {
       throw new HerdrClientError(
-        `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOL}`,
+        `Unsupported Herdr protocol ${pong.protocol}; expected ${SUPPORTED_PROTOCOLS_LABEL}`,
         "failed",
         "unsupported_protocol",
       );
@@ -590,9 +593,9 @@ export class HerdrClient {
     if (!state || !Array.isArray(state.workspaces) || !Array.isArray(state.panes) || !Array.isArray(state.tabs)) {
       throw new HerdrClientError("Malformed Herdr session snapshot", "failed", "malformed_response");
     }
-    if (typeof state.protocol === "number" && state.protocol !== SUPPORTED_PROTOCOL) {
+    if (typeof state.protocol === "number" && !SUPPORTED_PROTOCOLS.has(state.protocol)) {
       throw new HerdrClientError(
-        `Unsupported Herdr snapshot protocol ${state.protocol}; expected ${SUPPORTED_PROTOCOL}`,
+        `Unsupported Herdr snapshot protocol ${state.protocol}; expected ${SUPPORTED_PROTOCOLS_LABEL}`,
         "failed",
         "unsupported_protocol",
       );

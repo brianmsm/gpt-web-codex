@@ -21,7 +21,7 @@ GWC standalone MCP server (local machine)
 
 **Direct tools.** GWC owns local direct terminal jobs, their in-memory job identities and associated output. Jobs may continue beyond a ChatGPT response, but they are **not Herdr PTYs** and are not generally reacquirable after process restart without their documented state. The direct file tools handle imports, reads, mutations and image previews under documented workspace checks.
 
-**Herdr.** Herdr owns its own durable Unix-socket session, workspaces, worktrees, tabs, panes and PTYs. GWC is a client of Herdr's Socket API protocol 20 (tested against Herdr 0.8.2); it does not kill or take over existing Herdr processes when GWC closes. Callers reuse concrete returned IDs, not UI focus or the "last active" pane.
+**Herdr.** Herdr owns its own durable Unix-socket session, workspaces, worktrees, tabs, panes and PTYs. GWC is a client of Herdr's Socket API protocols 20 (0.8.2) and 22 (0.9.1), explicitly validated and allowlisted; it does not kill or take over existing Herdr processes when GWC closes. Callers reuse concrete returned IDs, not UI focus or the "last active" pane.
 
 **External MCP.** GWC loads explicitly configured stdio/Streamable HTTP servers when initializing its tool catalog. Discovered tools are prefixed by the configured alias. Server startup and remote tool execution are separate bounded operations. The optional Chromium-on-demand wrapper is specific to one reviewed Linux deployment, not core GWC behavior.
 
