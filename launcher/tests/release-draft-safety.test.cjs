@@ -1,6 +1,7 @@
 "use strict";
 
-// Test exactly the shell script used by release.yml without touching GitHub.
+// R6 entrypoint and client contracts. The Python release suite owns stateful
+// REST/TLS tests; no case in this file can contact or mutate GitHub.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -9,165 +10,122 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 
-const script = path.resolve(__dirname, "../../scripts/stage-release-draft.sh");
+const root = path.resolve(__dirname, "../..");
+const script = path.join(root, "scripts/stage-release-draft.sh");
+const python = path.join(root, "scripts/stage_release_draft.py");
 const runnable = process.platform !== "win32"
   && spawnSync("bash", ["-n", script]).status === 0
-  && spawnSync("python3", ["--version"]).status === 0
-  && spawnSync("jq", ["--version"]).status === 0
-  && spawnSync("sha256sum", ["--version"]).status === 0;
+  && spawnSync("python3", ["-B", "-c", "import ssl,http.client,json"]).status === 0;
 
-function withFixture(options, check) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gwc-r5-draft-contract-"));
+function fixture(fn) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gwc-r6-local-"));
   try {
-    const bin = path.join(temp, "bin");
-    const state = path.join(temp, "state");
-    const assets = path.join(temp, "release-assets");
-    fs.mkdirSync(bin); fs.mkdirSync(state); fs.mkdirSync(assets);
-    const good = Buffer.from("synthetic-release-binary; no secrets");
-    fs.writeFileSync(path.join(assets, "good.zip"), good);
+    const assets = path.join(temp, "assets");
+    fs.mkdirSync(assets);
+    const data = Buffer.from("synthetic R6 local input\n");
+    fs.writeFileSync(path.join(assets, "good.zip"), data);
     fs.writeFileSync(path.join(assets, "checksums.txt"),
-      createHash("sha256").update(good).digest("hex") + "  good.zip\n");
-    const mock = [
-      "#!/usr/bin/env bash",
-      "set -euo pipefail",
-      "printf \"%s\\n\" \"$*\" >> \"$MOCK_STATE_DIR/gh.log\"",
-      "if [[ \"${1:-}\" == api ]]; then",
-      "  endpoint=\"${@: -1}\"",
-      "  case \"$endpoint\" in",
-      "    repos/example/gwc-test)",
-      "      printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{\"full_name\":\"example/gwc-test\",\"permissions\":{\"push\":true}}'",
-      "      exit 0 ;;",
-      "    \"repos/example/gwc-test/releases?per_page=100\")",
-      "      if [[ \"$MOCK_EXISTING_RELEASE\" == 1 || -f \"$MOCK_STATE_DIR/created\" ]]; then",
-      "        printf '[[{\"id\":711,\"tag_name\":\"v2.3.0\",\"name\":\"v2.3.0\",\"draft\":true,\"prerelease\":false}]]'",
-      "      else",
-      "        printf '[[]]'",
-      "      fi",
-      "      exit 0 ;;",
-      "    \"repos/example/gwc-test/releases?per_page=100&page=2\")",
-      "      printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n[]'",
-      "      exit 0 ;;",
-      "    repos/example/gwc-test/releases/tags/v2.3.0)",
-      "      if [[ \"$MOCK_EXISTING_RELEASE\" == 1 && \"$MOCK_DRAFT_HIDDEN_BY_TAG\" != 1 || -f \"$MOCK_STATE_DIR/created\" ]]; then",
-      "        printf 'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{\"tag_name\":\"v2.3.0\"}'",
-      "        exit 0",
-      "      fi",
-      "      printf 'HTTP/2.0 404 Not Found\\ncontent-type: application/json\\n\\n{\"message\":\"Not Found\",\"status\":\"404\"}'",
-      "      exit 1 ;;",
-      "    *) exit 98 ;;",
-      "  esac",
-      "fi",
-      "if [[ \"${1:-}\" != release ]]; then exit 98; fi",
-      "case \"${2:-}\" in",
-      "  view)",
-      "    if [[ \" $* \" == *\" --json \"* ]]; then",
-      "      if [[ ! -f \"$MOCK_STATE_DIR/created\" ]]; then exit 91; fi",
-      "      case \"$MOCK_REMOTE_CASE\" in",
-      "        exact) printf '{\"databaseId\":811,\"tagName\":\"v2.3.0\",\"isDraft\":true,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"}]}\\n' ;;",
-      "        stale) printf '{\"databaseId\":811,\"tagName\":\"v2.3.0\",\"isDraft\":true,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"},{\"name\":\"stale.zip\"}]}\\n' ;;",
-      "        published) printf '{\"databaseId\":811,\"tagName\":\"v2.3.0\",\"isDraft\":false,\"assets\":[{\"name\":\"good.zip\"},{\"name\":\"checksums.txt\"}]}\\n' ;;",
-      "        *) exit 99 ;;",
-      "      esac",
-      "    else",
-      "      exit 95",
-      "    fi",
-      "    ;;",
-      "  create)",
-      "    if [[ \"$MOCK_EXISTING_RELEASE\" == 1 ]]; then exit 97; fi",
-      "    touch \"$MOCK_STATE_DIR/created\"",
-      "    ;;",
-      "  *) exit 96 ;;",
-      "esac",
-    ].join("\n") + "\n";
-    fs.writeFileSync(path.join(bin, "gh"), mock, { mode: 0o700 });
+      createHash("sha256").update(data).digest("hex") + "  good.zip\n");
     const env = {
       ...process.env,
-      PATH: bin + ":" + process.env.PATH,
-      MOCK_STATE_DIR: state,
-      MOCK_EXISTING_RELEASE: options.existing ? "1" : "0",
-      MOCK_DRAFT_HIDDEN_BY_TAG: options.hiddenDraft ? "1" : "0",
-      MOCK_REMOTE_CASE: options.remote || "exact",
       GITHUB_REF_NAME: "v2.3.0",
-      GITHUB_REPOSITORY: "example/gwc-test",
-      GH_TOKEN: "SYNTHETIC-LOCAL-ONLY",
+      GITHUB_REPOSITORY: "synthetic/release-fixture",
       GH_HOST: "github.com",
+      GH_TOKEN: "R6_SYNTHETIC_NO_REAL_ACCESS",
+      RELEASE_APPROVED_COMMIT_SHA: "",
+      RELEASE_STAGE_JOURNAL: path.join(temp, "journal.json"),
     };
-    check({ temp, assets, env, state });
+    fn({ temp, assets, env });
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 
-function execute(ctx) {
-  const run = spawnSync("bash", [script, ctx.assets], {
-    cwd: ctx.temp, env: ctx.env, encoding: "utf8", timeout: 10_000,
+function run(ctx) {
+  return spawnSync("bash", [script, ctx.assets], {
+    cwd: ctx.temp, env: ctx.env, encoding: "utf8", timeout: 7000,
   });
-  const events = fs.existsSync(path.join(ctx.state, "gh.log"))
-    ? fs.readFileSync(path.join(ctx.state, "gh.log"), "utf8").trim().split("\n") : [];
-  return { ...run, events };
 }
 
-test("fresh tag creates a draft with exact checksummed assets", { skip: !runnable }, () => {
-  withFixture({}, ctx => {
-    const r = execute(ctx);
-    assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /DRAFT_STAGED_ASSET_INVENTORY_VERIFIED=2/);
-    assert.equal(r.events.filter(x => x.includes(" api ") || x.startsWith("api ")).length, 4);
-    assert.ok(r.events.some(x => x.includes("release create") && x.includes("--verify-tag") && x.includes("--draft")));
-    assert.ok(!r.events.some(x => x.includes("release upload")));
+function checkPython(code) {
+  const result = spawnSync("python3", ["-B", "-c",
+    "import sys;sys.path.insert(0," + JSON.stringify(path.join(root, "scripts")) + ");" + code], {
+    encoding: "utf8", timeout: 7000,
   });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+}
+
+test("release workflow entrypoint delegates to strict REST Python, not gh", { skip: !runnable }, () => {
+  assert.match(fs.readFileSync(script, "utf8"), /exec python3 -B/);
+  assert.doesNotMatch(fs.readFileSync(script, "utf8"), /gh release (?:create|view|upload)/);
+  assert.match(fs.readFileSync(python, "utf8"), /http\.client\.HTTPSConnection/);
 });
-test("existing draft with stale asset is rejected before any upload", { skip: !runnable }, () => {
-  withFixture({ existing: true }, ctx => {
-    const r = execute(ctx);
+
+test("missing independent SHA prevents any remote call", { skip: !runnable }, () => {
+  fixture(ctx => {
+    const r = run(ctx);
     assert.equal(r.status, 3, r.stderr);
-    assert.match(r.stderr, /Cannot prove absence of draft\/published release/);
-    assert.ok(!r.events.some(x => x.includes("release create") || x.includes("release upload")));
-  });
-});
-test("existing published release is rejected before mutation", { skip: !runnable }, () => {
-  withFixture({ existing: true, remote: "published" }, ctx => {
-    const r = execute(ctx);
-    assert.equal(r.status, 3);
-    assert.ok(!r.events.some(x => x.includes("release create") || x.includes("release upload")));
-  });
-});
-test("unexpected post-create stale asset fails closed", { skip: !runnable }, () => {
-  withFixture({ remote: "stale" }, ctx => {
-    const r = execute(ctx);
-    assert.equal(r.status, 3, r.stderr);
-    assert.match(r.stderr, /Remote release response is invalid or draft asset names differ/);
-    assert.ok(!r.events.some(x => x.includes("release upload")));
-  });
-});
-test("non-draft response fails rather than claiming success", { skip: !runnable }, () => {
-  withFixture({ remote: "published" }, ctx => {
-    const r = execute(ctx);
-    assert.equal(r.status, 3);
-    assert.match(r.stderr, /Remote release response is invalid or draft asset names differ/);
-  });
-});
-test("unchecksummed local asset is rejected before GitHub access", { skip: !runnable }, () => {
-  withFixture({}, ctx => {
-    fs.writeFileSync(path.join(ctx.assets, "stale.zip"), "unmanifested");
-    const r = execute(ctx);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /Checksum manifest does not exactly describe/);
-    assert.equal(r.events.length, 0);
-  });
-});
-test("corrupted checksum is rejected before GitHub access", { skip: !runnable }, () => {
-  withFixture({}, ctx => {
-    fs.writeFileSync(path.join(ctx.assets, "good.zip"), "changed-after-manifest");
-    const r = execute(ctx);
-    assert.notEqual(r.status, 0);
-    assert.equal(r.events.length, 0);
+    assert.match(r.stderr, /Invalid commit SHA/);
+    assert.equal(fs.existsSync(ctx.env.RELEASE_STAGE_JOURNAL), false);
   });
 });
 
-test("draft in REST listing blocks even when get-by-tag returns 404", { skip: !runnable }, () => {
-  withFixture({ existing: true, hiddenDraft: true }, ctx => {
-    const r = execute(ctx);
-    assert.equal(r.status, 3, r.stderr);
-    assert.match(r.stderr, /Cannot prove absence/);
-    assert.ok(!r.events.some(x => x.includes("release create") || x.includes("release upload")));
+test("unchecksummed file is refused before any remote access", { skip: !runnable }, () => {
+  fixture(ctx => {
+    fs.writeFileSync(path.join(ctx.assets, "stale.zip"), "stale");
+    const r = run(ctx);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /Checksum manifest/);
+    assert.equal(fs.existsSync(ctx.env.RELEASE_STAGE_JOURNAL), false);
   });
+});
+
+test("a mutated checksummed binary is refused", { skip: !runnable }, () => {
+  fixture(ctx => {
+    fs.writeFileSync(path.join(ctx.assets, "good.zip"), "mutated");
+    const r = run(ctx);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /Checksum verification failed/);
+    assert.equal(fs.existsSync(ctx.env.RELEASE_STAGE_JOURNAL), false);
+  });
+});
+
+test("REST JSON requires full consumption and casefold-unique keys", { skip: !runnable }, () => {
+  checkPython(`import stage_release_draft as s
+for b in (b'{}\\0',b'{} junk',b'{}{}',b'{"draft":false,"draft":true}',b'{"DRAFT":false,"draft":true}',b'[NaN]'):
+ try:s.strict_json(b);assert False,b
+ except s.StageError:pass
+assert s.strict_json(b'{"ok":true}') == {'ok':True}`);
+});
+
+test("release ID never accepts postflight object B", { skip: !runnable }, () => {
+  checkPython(`import stage_release_draft as s
+stem='/repos/synthetic/release-fixture/releases'
+r={'id':100101,'tag_name':'v2.3.0','name':'v2.3.0','draft':True,'prerelease':False,'url':s.API+stem+'/100101','upload_url':s.UPLOADS+stem+'/100101/assets{?name,label}','assets':[]}
+try:s.release_identity(r,stem,'v2.3.0',100001);assert False
+except s.StageError:pass`);
+});
+
+test("missing name invalid, name null valid", { skip: !runnable }, () => {
+  checkPython(`import stage_release_draft as s
+r={'id':1,'tag_name':'old','draft':False,'prerelease':False}
+try:s.release_entry(r,'v2.3.0');assert False
+except s.StageError:pass
+r['name']=None;assert s.release_entry(r,'v2.3.0')==(1,'old')`);
+});
+
+test("upload_url refuses release-ID substitution and external host", { skip: !runnable }, () => {
+  checkPython(`import stage_release_draft as s
+stem='/repos/synthetic/release-fixture/releases'
+for url in ('https://evil.invalid'+stem+'/100001/assets{?name,label}',s.UPLOADS+stem+'/100101/assets{?name,label}'):
+ try:s.upload_template({'upload_url':url},stem,100001);assert False
+ except s.StageError:pass`);
+});
+
+test("asset SHA-256 and uploaded state are gates, not just filenames", { skip: !runnable }, () => {
+  checkPython(`import stage_release_draft as s
+r={'id':1,'name':'test.zip','state':'uploaded','size':3,'digest':'sha256:'+'0'*64}
+try:s.asset_identity(r,'test.zip',3,'f'*64,set());assert False
+except s.StageError:pass
+r['digest']='sha256:'+'f'*64;r['state']='starter'
+try:s.asset_identity(r,'test.zip',3,'f'*64,set());assert False
+except s.StageError:pass`);
 });

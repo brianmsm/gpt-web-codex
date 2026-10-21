@@ -34,3 +34,70 @@ The public commit sequence is an intentionally **privacy-curated reconstruction*
 ## Not part of this procedure
 
 This document does **not** authorize a tag move, branch merge, push, GitHub Release creation, systemd restart, browser-profile migration, or deletion of local/private state. Each requires a separately approved operator action.
+## R6 staging contract (pending independent audit; no authorization to publish)
+
+The Bash entrypoint remains `scripts/stage-release-draft.sh`, but all authenticated
+HTTP traffic is performed directly by the Python 3 standard-library REST client.
+It performs no `gh release create`, tag writes, release updates/deletes, publishing,
+retries, or remotely directed diagnostics. The only mutations are **one** release
+creation POST and, once its immutable numeric ID is captured, one upload POST for
+each verified local file. It never follows HTTP redirects and accepts an upload
+URL only at the canonical `uploads.github.com` release-ID/repository path. The
+client uses the system's certificate-verifying TLS context and bounded streaming.
+
+**Mandatory independent approval:** before any tag-triggered workflow is run,
+maintainers must (1) independently approve the exact sanitized release commit SHA
+and its reachable history, (2) configure the `release-staging` GitHub Environment
+with required reviewers and a protected environment variable named
+`RELEASE_APPROVED_COMMIT_SHA` containing that full 40-hex SHA, (3) verify its
+value independently of the tag push/GITHUB_SHA event, (4) confirm the GitHub
+remote tag already exists and resolves to this approved commit, (5) resolve
+R4T-03 runner token `permissions.push` and draft visibility in a separately
+approved **read-only** diagnostic, and (6) resolve R4T-04 by integrating the
+reviewed workflow on the default branch **before** the tag push. Missing approval
+or unreadable permissions is a hard denial. The staging REST call includes
+`target_commitish=RELEASE_APPROVED_COMMIT_SHA`, but GitHub ignores this field for
+existing tags, so the client explicitly resolves the tag through Git refs and
+annotated tag objects before creation, just before POST, and after upload.
+These reads cannot eliminate external tag-move races between requests.
+
+**State and partial effects:** a private local journal at
+`$RELEASE_STAGE_JOURNAL` (created mode 0600 with exclusive creation, flushed
+before POST) records state transitions, known release ID, uploaded asset IDs, and
+manual-review outcomes; it never includes a token. An existing journal blocks
+replay. `CREATE_ATTEMPTED` means a POST may have reached GitHub even if its
+response was lost. Any subsequent failure becomes `MANUAL_REVIEW_REQUIRED`:
+no automatic retry, deletion, upload continuation or reuse of a draft. GitHub
+Actions concurrency serializes only runs with the same group and is not a
+universal lock. A new Actions run has a different journal; remote list checks
+still cannot promise exactly-once under external concurrency. Release IDs and
+asset IDs are checked as positive integers, matched across POST and GET by-ID.
+
+**Budget:** default 32 explicitly requested consecutive pages at `per_page=100`,
+8 MiB per JSON response, 32 MiB cumulative JSON response bodies, 15 s per JSON REST operation, 1800 s per streamed asset upload, 180 s
+preflight, and 3600 s overall. Each is enforced during
+its request; budget exhaustion blocks rather than proceeding with an incomplete
+inventory. Limits can be lowered/increased within audited caps using
+`RELEASE_MAX_PAGES` (1–256), `RELEASE_MAX_RESPONSE_BYTES` (1 KiB–32 MiB),
+`RELEASE_MAX_TOTAL_BYTES` (1 KiB–256 MiB), `RELEASE_REQUEST_TIMEOUT` (1–120 s),
+`RELEASE_PREFLIGHT_SECONDS` (1–1200 s), and `RELEASE_OVERALL_SECONDS`
+(1–21600 s), and `RELEASE_UPLOAD_TIMEOUT` (1–21600 s). A short page requires an explicitly empty next page. The sequence
+is **not** an atomic GitHub snapshot; detectability of concurrent shifts is
+limited, and uncertain states require human review.
+
+**Integrity:** the client independently hashes `checksums.txt` and every
+checksummed top-level regular file. HTTP uploads stream in 1 MiB chunks with
+content-length and a second running SHA-256 check. The upload POST response and
+GET-by-ID postflight and a separate **consecutively paginated GET-by-ID assets list**
+must agree on release ID, asset IDs, names, `uploaded` state, size and
+`sha256:<64 hex>` digests. The embedded assets array in a release response is
+not presumed to be a complete inventory. GitHub REST documentation describes the
+`digest` field for release assets; R6 deliberately fails closed if this field is
+missing or null on a newly uploaded asset. These checks establish server-reported
+binary SHA-256 equivalence to the local bytes, not publisher identity, software
+provenance or a verified cryptographic signature. Actual multi-platform
+artifacts remain a separate operational release gate.
+
+No local private tag is to be moved by this implementation. In particular,
+`v2.3.0` currently resolves to a private-history object in this checkout and
+must be handled through a **separate** authorized, privacy-verified procedure.

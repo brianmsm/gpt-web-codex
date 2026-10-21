@@ -80,6 +80,8 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # Configure protected reviewers and RELEASE_APPROVED_COMMIT_SHA here before any tag push.
+    environment: release-staging
     permissions:
       contents: write
     steps:
@@ -148,4 +150,6 @@ jobs:
       - name: Stage fresh checksummed GitHub Release draft (manual review required)
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_APPROVED_COMMIT_SHA: ${{ vars.RELEASE_APPROVED_COMMIT_SHA }}
+          RELEASE_STAGE_JOURNAL: ${{ runner.temp }}/release-stage-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash scripts/stage-release-draft.sh release-assets
