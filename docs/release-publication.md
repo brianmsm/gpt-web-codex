@@ -101,3 +101,40 @@ artifacts remain a separate operational release gate.
 No local private tag is to be moved by this implementation. In particular,
 `v2.3.0` currently resolves to a private-history object in this checkout and
 must be handled through a **separate** authorized, privacy-verified procedure.
+
+## R7 focused safety corrections (awaiting independent audit)
+
+The R7 staging changes are **not** permission to publish a tag or release.
+They enforce the exact REST object identity in an optional HTTP 201 Location
+header and in asset REST url fields, rather than trusting a shared path
+prefix. The strict JSON decoder rejects numeric exponents that overflow the
+supported finite range. Local release files are opened nonblocking and then
+validated with fstat, preventing a FIFO swapped for an input file from
+blocking the process before validation. The postflight's final local hash
+checks share the global deadline, and a newly created journal's parent
+directory is synced before any remote POST is attempted.
+
+**Source and binary association across the build matrix:** each of the four
+platform builds produces a release-source-<runner>.json file containing the
+exact checked-out commit, GitHub workflow run ID/attempt, runner identity and
+SHA-256 digests of the runtime archive and packaged installers. The publisher,
+before generating final checksums or contacting the release API, requires all
+four manifests to agree with the independently approved SHA, GITHUB_SHA,
+the publisher's own checked-out HEAD, and the current workflow run; it also
+rehashes and checks that the *entire downloaded artifact set* matches the
+four original manifests. The manifest files themselves are included in the
+draft's checksummed assets. These are **CI self-reported source/build records**,
+not independently signed SLSA attestations or proof that a compiler behaved
+correctly. Actual OS-specific signing, binary inspection and provenance
+are separate gates.
+
+**Non-atomic GitHub tag precondition:** the GitHub REST create-release API
+may implicitly create the tag if an external actor deletes it after the
+last verified GET and before POST. Repeating GET cannot close this race.
+Before staging, an authorized maintainer must verify operational tag
+protection/freeze, immutable release SHA approval, independently reviewed
+default-branch integration and token/draft visibility on the real runner.
+No automation should claim absolute no-implicit-tag-creation security under
+arbitrary concurrent tag mutations. The private local v2.3.0 tag remains
+blocked and must never be pushed by a bulk refspec. None of these gates has
+been executed or authorized by R7 development.

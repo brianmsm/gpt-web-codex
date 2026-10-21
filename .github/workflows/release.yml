@@ -30,6 +30,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -66,10 +69,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path launcher/build/runtime/* -DestinationPath "${{ matrix.runtime_asset }}"
+      - name: Record exact checked-out commit for this platform build
+        run: python scripts/release_build_identity.py record --runner "${{ matrix.runner }}" --output "release-source-${{ matrix.runner }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.runner }}
           path: |
+            release-source-${{ matrix.runner }}.json
             ${{ matrix.runtime_asset }}
             launcher/artifacts/*.dmg
             launcher/artifacts/*.zip
@@ -86,6 +92,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -99,6 +108,10 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Verify all four platform builds match independently approved source SHA
+        env:
+          RELEASE_APPROVED_COMMIT_SHA: ${{ vars.RELEASE_APPROVED_COMMIT_SHA }}
+        run: python scripts/release_build_identity.py verify --directory release-assets
       - name: Verify release tag matches package version
         run: |
           expected="v$(jq -r .version package.json)"

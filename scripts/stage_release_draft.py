@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 import hashlib
 import http.client
 import json
@@ -56,10 +57,21 @@ def strict_json(data: bytes):
     def constants(value):
         raise ValueError('non-finite JSON number')
 
+    def finite_decimal(value):
+        # Python float() silently turns an overflowing JSON exponent (1e999)
+        # into infinity even when parse_constant rejects NaN and Infinity.
+        try:
+            number = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError('invalid JSON decimal') from exc
+        if not number.is_finite() or abs(number.adjusted()) > 308:
+            raise ValueError('JSON numeric value outside finite supported range')
+        return number
+
     try:
         # json.loads consumes the entire document, rejects NUL/trailing data and UTF-8 errors.
         result = json.loads(data.decode('utf-8'), object_pairs_hook=pairs,
-                            parse_constant=constants)
+                            parse_constant=constants, parse_float=finite_decimal)
     except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise StageError('Invalid complete REST JSON document') from exc
     return result
@@ -176,6 +188,9 @@ class Rest:
         timeout = max(.01, min(self.limits.request_timeout, limit - now))
         conn = http.client.HTTPSConnection(parsed.hostname, 443, timeout=timeout,
                                          context=ssl.create_default_context())
+        # Never permit a globally enabled http.client debuglevel to print bearer
+        # Authorization headers to Actions stdout.
+        conn.set_debuglevel(0)
         path = parsed.path + (('?' + parsed.query) if parsed.query else '')
         hard_timeout = (self.limits.upload_seconds if file_path is not None
                         else self.limits.request_timeout)
@@ -225,11 +240,15 @@ class Rest:
                 need(encoding is None and not 300 <= response.status < 400,
                      'Redirect or content encoding disallowed')
                 if location is not None:
+                    # At this layer only reject untrusted destinations. Exact
+                    # release/asset object identity is checked AFTER decoding
+                    # the complete 201 body in execute().
                     dest = urlsplit(location)
                     need(response.status == 201 and dest.scheme == 'https'
                          and dest.hostname == 'api.github.com' and dest.port is None
-                         and dest.username is None and dest.fragment == ''
-                         and dest.path.startswith(parsed.path.split('/assets', 1)[0].split('?')[0]),
+                         and dest.username is None and dest.password is None
+                         and not dest.fragment and not dest.query
+                         and re.fullmatch(r'/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/(?:assets/)?[1-9][0-9]*', dest.path) is not None,
                          'Unexpected 201 Location header')
                 need(mime is not None and re.fullmatch(r'application/(?:[a-z0-9.-]+\+)?json(?:\s*;[^\r\n]*)?',
                                                         mime.lower()) is not None,
@@ -275,9 +294,17 @@ class SafeFile:
         self.fd = None
 
     def __enter__(self):
-        self.fd = os.open(self.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        self.before = os.fstat(self.fd)
-        need(stat.S_ISREG(self.before.st_mode), 'Release asset must be regular')
+        # O_NONBLOCK prevents a FIFO swapped in after is_file() from hanging
+        # before fstat can reject it. It has no effect on regular file reads.
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK |
+                          getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0))
+        try:
+            self.before = os.fstat(self.fd)
+            need(stat.S_ISREG(self.before.st_mode), 'Release asset must be regular')
+        except BaseException:
+            os.close(self.fd)
+            self.fd = None
+            raise
         self.stat_size = self.before.st_size
         return self
 
@@ -345,7 +372,7 @@ def local_assets(directory):
     return result
 
 
-def check_link(response, page, per_page, *, expected_path):
+def check_link(response, page, per_page, *, expected_path, repository_id):
     link = response.header('Link')
     if link is None:
         return False
@@ -358,12 +385,15 @@ def check_link(response, page, per_page, *, expected_path):
     need(len(next_links) <= 1, 'Ambiguous pagination Link metadata')
     if next_links:
         url = urlsplit(next_links[0])
-        query = parse_qs(url.query)
+        query = parse_qs(url.query, keep_blank_values=True)
+        # GitHub may emit /repositories/{id}/releases aliases in pagination
+        # metadata. Accept only the authenticated repository ID, not any ID.
+        alias = (f'/repositories/{repository_id}/releases' +
+                 expected_path.split('/releases', 1)[1])
         need(url.scheme == 'https' and url.hostname == 'api.github.com'
-             and url.port is None and url.username is None and url.fragment == ''
-             and (url.path == expected_path or
-                  re.fullmatch(r'/repositories/[1-9][0-9]*/releases' +
-                               re.escape(expected_path.split('/releases', 1)[1]), url.path))
+             and url.port is None and url.username is None and url.password is None
+             and url.fragment == '' and url.path in (expected_path, alias)
+             and set(query) == {'page', 'per_page'}
              and query.get('page') == [str(page + 1)]
              and query.get('per_page') == [str(per_page)],
              'Non-consecutive pagination Link')
@@ -384,13 +414,13 @@ def release_entry(entry, target):
     return rid, tag
 
 
-def list_absence(rest, stem, target, max_pages):
+def list_absence(rest, stem, target, max_pages, repository_id):
     ids, tags = set(), set()
     # Always request the explicit next consecutive page; never trust Link as a pager.
     for page in range(1, max_pages + 1):
         response = rest.request('GET', f'{API}{stem}?per_page=100&page={page}', preflight=True)
         need(response.status == 200, 'Release listing did not return HTTP 200')
-        linked_next = check_link(response, page, 100, expected_path=stem)
+        linked_next = check_link(response, page, 100, expected_path=stem, repository_id=repository_id)
         entries = strict_json(response.body)
         need(type(entries) is list and len(entries) <= 100, 'Invalid release listing page')
         for entry in entries:
@@ -404,14 +434,14 @@ def list_absence(rest, stem, target, max_pages):
             need(page < max_pages, 'No budget for pagination boundary')
             boundary = rest.request('GET', f'{API}{stem}?per_page=100&page={page+1}', preflight=True)
             need(boundary.status == 200, 'Pagination boundary HTTP failure')
-            need(not check_link(boundary, page + 1, 100, expected_path=stem),
+            need(not check_link(boundary, page + 1, 100, expected_path=stem, repository_id=repository_id),
                  'Empty pagination boundary advertises further pages')
             need(strict_json(boundary.body) == [], 'Nonempty or invalid pagination boundary')
             return ids
     raise StageError('Release page budget exhausted without verified boundary')
 
 
-def list_release_assets(rest, stem, rid, expected_count, max_pages):
+def list_release_assets(rest, stem, rid, expected_count, max_pages, repository_id):
     """Read the REST list-assets endpoint in verified order, never truncated embedded arrays."""
     need(0 < expected_count <= 100 * (max_pages - 1),
          'Insufficient asset pagination budget')
@@ -421,7 +451,7 @@ def list_release_assets(rest, stem, rid, expected_count, max_pages):
     for page in range(1, max_pages + 1):
         response = rest.request('GET', f'{API}{stem}/{rid}/assets?per_page=100&page={page}')
         need(response.status == 200, 'Asset list postflight HTTP failure')
-        linked_next = check_link(response, page, 100, expected_path=f'{stem}/{rid}/assets')
+        linked_next = check_link(response, page, 100, expected_path=f'{stem}/{rid}/assets', repository_id=repository_id)
         entries = strict_json(response.body)
         need(type(entries) is list and len(entries) <= 100, 'Malformed remote asset page')
         need(len(all_assets) + len(entries) <= expected_count, 'Extra remote asset detected')
@@ -441,7 +471,7 @@ def list_release_assets(rest, stem, rid, expected_count, max_pages):
                 f'{API}{stem}/{rid}/assets?per_page=100&page={page+1}')
             need(boundary.status == 200, 'Asset pagination boundary HTTP failure')
             need(not check_link(boundary, page+1, 100,
-                                expected_path=f'{stem}/{rid}/assets'),
+                                expected_path=f'{stem}/{rid}/assets', repository_id=repository_id),
                  'Asset pagination boundary links to unexpected content')
             need(strict_json(boundary.body) == [] and len(all_assets) == expected_count,
                  'Incomplete or inconsistent asset boundary')
@@ -481,6 +511,30 @@ def upload_template(release, stem, rid):
     return value.split('{', 1)[0]
 
 
+def check_created_location(response, expected_url):
+    # HTTP Location is optional in GitHub responses, but when supplied it
+    # must name the same immutable REST resource as the validated JSON ID.
+    location = response.header('Location')
+    if location is not None:
+        need(location == expected_url, 'HTTP 201 Location contradicts created object identity')
+
+
+def overall_time_guard(rest):
+    """Bound local postflight work by the same overall deadline as REST calls."""
+    @contextmanager
+    def guard():
+        deadline = getattr(rest, 'deadline', None)
+        if deadline is None:  # Existing in-memory test transports
+            yield
+            return
+        left = deadline - time.monotonic()
+        need(left > 0, 'Overall staging time exhausted before final checks')
+        with deadline_guard(left):
+            yield
+        need(time.monotonic() < deadline, 'Overall staging time exhausted before success')
+    return guard()
+
+
 def release_identity(value, stem, tag, rid=None):
     r = obj(value, ('id', 'tag_name', 'name', 'draft', 'prerelease', 'url', 'upload_url', 'assets'))
     ident = pos_int(r['id'])
@@ -493,9 +547,12 @@ def release_identity(value, stem, tag, rid=None):
     return ident
 
 
-def asset_identity(asset, name, size, digest, previous_ids):
+def asset_identity(asset, name, size, digest, previous_ids, stem):
     a = obj(asset, ('id', 'name', 'state', 'size', 'digest'))
     aid = pos_int(a['id'])
+    if 'url' in a:
+        need(a['url'] == f'{API}{stem}/assets/{aid}',
+             'Asset REST URL does not match immutable asset ID')
     need(aid not in previous_ids and a['name'] == name and a['state'] == 'uploaded'
          and type(a['size']) is int and a['size'] == size
          and a['digest'] == 'sha256:' + digest,
@@ -506,7 +563,18 @@ def asset_identity(asset, name, size, digest, previous_ids):
 class Journal:
     def __init__(self, path, tag):
         self.path = Path(path)
-        self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        # Persist the newly created filename before any remote mutation. An
+        # fsync of the file alone is not a directory-entry durability guarantee.
+        try:
+            parent = os.open(self.path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        except BaseException:
+            os.close(self.fd)
+            raise
         self.data = {'tag': tag, 'state': 'PREFLIGHT_DENIED'}
         self.update('PREFLIGHT_DENIED')
 
@@ -548,13 +616,14 @@ def execute(directory, *, rest=None):
     try:
         repo_response = rest.request('GET', f'{API}/repos/{repo}', preflight=True)
         need(repo_response.status == 200, 'Repository authentication failed')
-        repo_item = obj(strict_json(repo_response.body), ('full_name', 'permissions'))
+        repo_item = obj(strict_json(repo_response.body), ('id', 'full_name', 'permissions'))
+        repository_id = pos_int(repo_item['id'])
         permissions = obj(repo_item['permissions'], ('push',))
         need(type(repo_item['full_name']) is str
              and repo_item['full_name'].casefold() == repo.casefold()
              and permissions['push'] is True, 'Repository identity or push visibility unverified')
         validate_tag(rest, stem, tag, approved, preflight=True)
-        list_absence(rest, stem, tag, limits.pages)
+        list_absence(rest, stem, tag, limits.pages, repository_id)
         bytag = rest.request('GET', f'{API}{stem}/tags/{quote(tag, safe="")}', preflight=True)
         need(bytag.status == 404, 'Existing release or by-tag HTTP failure')
         missing = obj(strict_json(bytag.body), ('message',))
@@ -572,6 +641,7 @@ def execute(directory, *, rest=None):
         need(response.status == 201, 'Release create returned non-201: manual review')
         created = strict_json(response.body)
         rid = release_identity(created, stem, tag)
+        check_created_location(response, f'{API}{stem}/{rid}')
         journal.update('CREATE_ID_CONFIRMED', release_id=rid)
         upload_base = upload_template(created, stem, rid)
         posted_ids = {}
@@ -581,7 +651,9 @@ def execute(directory, *, rest=None):
                                     file_path=path, size=size, expected_digest=digest)
             need(uploaded.status == 201, 'Asset upload returned non-201: manual review')
             remote = strict_json(uploaded.body)
-            posted_ids[name] = asset_identity(remote, name, size, digest, set(posted_ids.values()))
+            aid = asset_identity(remote, name, size, digest, set(posted_ids.values()), stem)
+            check_created_location(uploaded, f'{API}{stem}/assets/{aid}')
+            posted_ids[name] = aid
             journal.update('CREATE_ID_CONFIRMED', current_asset=None, uploaded_ids=posted_ids)
         post = rest.request('GET', f'{API}{stem}/{rid}')
         need(post.status == 200, 'Postflight ID lookup failed: manual review')
@@ -590,27 +662,28 @@ def execute(directory, *, rest=None):
         # Release GET establishes the *release* ID. Its embedded assets array
         # is not an exhaustive paginated asset inventory. Query the dedicated
         # list-assets endpoint tied to the same immutable release ID instead.
-        remote_assets = list_release_assets(rest, stem, rid, len(assets), limits.pages)
+        remote_assets = list_release_assets(rest, stem, rid, len(assets), limits.pages, repository_id)
         remote_ids, remote_names = set(), set()
         for asset in remote_assets:
             name = asset['name']
             need(type(name) is str and name in assets and name not in remote_names,
                  'Unknown/duplicate remote asset name')
             _, size, digest = assets[name]
-            aid = asset_identity(asset, name, size, digest, remote_ids)
+            aid = asset_identity(asset, name, size, digest, remote_ids, stem)
             need(aid == posted_ids[name], 'Postflight asset ID differs from uploaded asset')
             remote_names.add(name)
             remote_ids.add(aid)
         need(remote_names == set(assets), 'Remote asset inventory incomplete')
         validate_tag(rest, stem, tag, approved)
-        for path, _, digest in assets.values():
-            h = hashlib.sha256()
-            with open_safe(path) as f:
-                while chunk := f.read(1024 * 1024):
-                    h.update(chunk)
-                need(f.unchanged() and h.hexdigest() == digest,
-                     'Local asset changed before final verification')
-        journal.update('DRAFT_VERIFIED', current_asset=None, verified_assets=len(assets))
+        with overall_time_guard(rest):
+            for path, _, digest in assets.values():
+                h = hashlib.sha256()
+                with open_safe(path) as f:
+                    while chunk := f.read(1024 * 1024):
+                        h.update(chunk)
+                    need(f.unchanged() and h.hexdigest() == digest,
+                         'Local asset changed before final verification')
+            journal.update('DRAFT_VERIFIED', current_asset=None, verified_assets=len(assets))
         print('DRAFT_STAGED_ASSET_INVENTORY_VERIFIED=' + str(len(assets)))
         print('DRAFT_STAGED_BINARY_DIGEST_VERIFIED=' + str(len(assets)))
         print('RELEASE_STAGE_STATE=DRAFT_VERIFIED RELEASE_ID=' + str(rid))

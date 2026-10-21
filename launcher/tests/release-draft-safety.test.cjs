@@ -123,9 +123,9 @@ for url in ('https://evil.invalid'+stem+'/100001/assets{?name,label}',s.UPLOADS+
 test("asset SHA-256 and uploaded state are gates, not just filenames", { skip: !runnable }, () => {
   checkPython(`import stage_release_draft as s
 r={'id':1,'name':'test.zip','state':'uploaded','size':3,'digest':'sha256:'+'0'*64}
-try:s.asset_identity(r,'test.zip',3,'f'*64,set());assert False
+try:s.asset_identity(r,'test.zip',3,'f'*64,set(),'/repos/synthetic/release-fixture/releases');assert False
 except s.StageError:pass
 r['digest']='sha256:'+'f'*64;r['state']='starter'
-try:s.asset_identity(r,'test.zip',3,'f'*64,set());assert False
+try:s.asset_identity(r,'test.zip',3,'f'*64,set(),'/repos/synthetic/release-fixture/releases');assert False
 except s.StageError:pass`);
 });

@@ -68,7 +68,7 @@ class MemoryRest:
         query = parse_qs(urlsplit(url).query)
         self.calls.append((method, url, kwargs.get('preflight', False)))
         if method == 'GET' and path == '/repos/' + REPO:
-            return response(200, {'full_name': REPO if not self.mode.get('wrong_repo') else 'other/repo',
+            return response(200, {'id': 8012345, 'full_name': REPO if not self.mode.get('wrong_repo') else 'other/repo',
                                   'permissions': {'push': not self.mode.get('no_push')}})
         if method == 'GET' and path == '/repos/' + REPO + '/git/ref/tags/' + TAG:
             self.tag_reads += 1
@@ -127,6 +127,10 @@ class MemoryRest:
                 result['upload_url'] = r6.UPLOADS + STEM + '/100101/assets{?name,label}'
             if self.mode.get('create_ambiguous'):
                 return response(201, json.dumps(result).encode() + b'\0', raw=True)
+            if self.mode.get('create_location_other_id'):
+                return response(201, result, (('Location', r6.API + STEM + '/100101'),))
+            if self.mode.get('create_location_bad_prefix'):
+                return response(201, result, (('Location', r6.API + STEM + 'X/100001'),))
             return response(201, result)
         if method == 'POST' and path.startswith(STEM + '/') and path.endswith('/assets'):
             rid = int(path.removeprefix(STEM + '/').split('/')[0])
@@ -141,7 +145,11 @@ class MemoryRest:
                      'size': len(data), 'digest': 'sha256:' + hashlib.sha256(data).hexdigest()}
             if self.mode.get('bad_upload_digest'):
                 asset['digest'] = 'sha256:' + '0' * 64
+            if self.mode.get('asset_body_url_wrong_id'):
+                asset['url'] = r6.API + STEM + '/assets/999998'
             self.created[rid]['assets'].append(copy.deepcopy(asset))
+            if self.mode.get('asset_location_wrong_id'):
+                return response(201, asset, (('Location', r6.API + STEM + '/assets/999998'),))
             return response(201, asset)
         if method == 'GET' and path.startswith(STEM + '/') and path.endswith('/assets'):
             rid = int(path.removeprefix(STEM + '/').split('/')[0])
@@ -263,6 +271,72 @@ class RestSafetyTests(unittest.TestCase):
                 if 'evil_upload_url' in mode or 'upload_wrong_id' in mode:
                     self.assertEqual(mock.uploads, [])
 
+    def test_created_resource_location_and_asset_identity_bound(self):
+        for mode in ('create_location_other_id', 'create_location_bad_prefix',
+                     'asset_location_wrong_id', 'asset_body_url_wrong_id'):
+            with self.subTest(mode=mode):
+                self.block({mode: True}, 'MANUAL_REVIEW_REQUIRED', 1)
+        # Correct Location metadata is accepted when it matches the immutable ID.
+        class CanonicalLocations(MemoryRest):
+            def request(self, method, url, **kwargs):
+                got = super().request(method, url, **kwargs)
+                path = urlsplit(url).path
+                if method == 'POST' and path == STEM and got.status == 201:
+                    return response(got.status, json.loads(got.body),
+                                    (('Location', r6.API + STEM + '/100001'),))
+                if method == 'POST' and path.endswith('/assets') and got.status == 201:
+                    item = json.loads(got.body)
+                    item['url'] = r6.API + STEM + '/assets/' + str(item['id'])
+                    return response(got.status, item,
+                                    (('Location', item['url']),))
+                return got
+        out, err, state = self.run_stage(CanonicalLocations())
+        self.assertIsNone(err)
+        self.assertEqual(state['state'], 'DRAFT_VERIFIED')
+        self.assertIn('DRAFT_STAGED', out)
+
+    def test_overflowing_json_exponents_are_not_silent_infinity(self):
+        for raw in (b'{"unused":1e999}', b'{"unused":-1e999}',
+                    b'{"unused":1e-999}', b'{"unused":[1e999]}'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(r6.StageError):
+                    r6.strict_json(raw)
+
+    def test_global_deadline_includes_final_local_postflight_hashing(self):
+        class DeadlineAfterTagRead(MemoryRest):
+            def request(self, method, url, **kwargs):
+                result = super().request(method, url, **kwargs)
+                if method == 'GET' and '/git/ref/tags/' in url and self.tag_reads == 3:
+                    time.sleep(.04)  # Expire before final hashing / success marker.
+                return result
+        mock = DeadlineAfterTagRead()
+        mock.deadline = time.monotonic() + .02
+        _, err, state = self.run_stage(mock)
+        self.assertIsNotNone(err)
+        self.assertEqual(mock.posts, 1)
+        self.assertEqual(state['state'], 'MANUAL_REVIEW_REQUIRED')
+
+    def test_fifo_local_swap_is_nonblocking_and_rejected(self):
+        fifo = self.root / 'injected.fifo'
+        os.mkfifo(fifo)
+        started = time.monotonic()
+        with self.assertRaises(r6.StageError):
+            with r6.open_safe(fifo):
+                self.fail('FIFO must never be accepted as a release asset')
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_new_journal_creation_fsyncs_parent_directory(self):
+        target = self.root / 'durable-journal.json'
+        observed = []
+        real_fsync = os.fsync
+        def watched(fd):
+            observed.append(os.fstat(fd).st_mode)
+            return real_fsync(fd)
+        with patch.object(r6.os, 'fsync', side_effect=watched):
+            journal = r6.Journal(target, TAG)
+            journal.close()
+        self.assertTrue(any(r6.stat.S_ISDIR(mode) for mode in observed))
+
     def test_POST_rest_original_ambiguous(self):
         for mode in ({'post_ambiguous': True}, {'post_duplicate': True}):
             with self.subTest(mode=mode):
@@ -290,6 +364,23 @@ class RestSafetyTests(unittest.TestCase):
 
     def test_page_skipping_link_refused_no_post(self):
         self.block({'skip_link': True, 'initial': [entry(i+1) for i in range(101)]})
+
+    def test_pagination_alias_rejects_other_repository_ids_and_extra_queries(self):
+        cases = [
+            f'<{r6.API}/repositories/99999/releases?per_page=100&page=2>; rel="next"',
+            f'<{r6.API}{STEM}?per_page=100&page=2&extra=yes>; rel="next"',
+            f'<{r6.API}{STEM}?per_page=100&page=2&page=2>; rel="next"',
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                wire = response(200, [entry(i+1) for i in range(100)],
+                                (('Link', value),))
+                with self.assertRaises(r6.StageError):
+                    r6.check_link(wire, 1, 100, expected_path=STEM, repository_id=8012345)
+        canonical = response(200, [], (('Link',
+            f'<{r6.API}/repositories/8012345/releases?per_page=100&page=2>; rel="next"'),))
+        self.assertTrue(r6.check_link(canonical, 1, 100,
+                                      expected_path=STEM, repository_id=8012345))
 
     def test_explicit_consecutive_pages_and_link_valid(self):
         mock = MemoryRest({'link_ok': True, 'initial': [entry(i+1) for i in range(201)]})
@@ -450,7 +541,7 @@ socket.create_connection=_isolated
                     return self.reply(403, {'message': 'not synthetic auth'})
                 owner.calls.append((self.command, p.path, p.query, self.headers.get('Host')))
                 if p.path == '/repos/' + REPO:
-                    return self.reply(200, {'full_name': REPO, 'permissions': {'push': True}})
+                    return self.reply(200, {'id': 8012345, 'full_name': REPO, 'permissions': {'push': True}})
                 if p.path == '/repos/' + REPO + '/git/ref/tags/' + TAG:
                     if owner.case == 'tag_absent':
                         return self.reply(404, {'message': 'Not Found'})
@@ -496,13 +587,26 @@ socket.create_connection=_isolated
                     raw = json.dumps(obj).encode()
                     if owner.case == 'create_nul':
                         raw += b'\0'
+                    if owner.case == 'create_nonfinite_exponent':
+                        raw = raw[:-1] + b',"unused":1e999}'
+                    if owner.case == 'create_location_other_id':
+                        return self.reply(201, raw=raw,
+                                          extra=[('Location', r6.API + STEM + '/100101')])
+                    if owner.case == 'create_location_bad_prefix':
+                        return self.reply(201, raw=raw,
+                                          extra=[('Location', r6.API + STEM + 'X/100001')])
                     return self.reply(201, raw=raw)
                 if p.path == STEM + '/100001/assets' and self.command == 'POST':
                     name = parse_qs(p.query)['name'][0]
                     remote_asset = {'id': 300001 + len(owner.assets_remote), 'name': name,
                                     'state': 'uploaded', 'size': len(body),
                                     'digest': 'sha256:' + hashlib.sha256(body).hexdigest()}
+                    if owner.case == 'asset_body_url_wrong_id':
+                        remote_asset['url'] = r6.API + STEM + '/assets/999998'
                     owner.assets_remote.append(remote_asset)
+                    if owner.case == 'asset_location_wrong_id':
+                        return self.reply(201, remote_asset,
+                                          extra=[('Location', r6.API + STEM + '/assets/999998')])
                     if owner.case == 'upload_drop':
                         self.close_connection = True
                         self.connection.shutdown(socket.SHUT_RDWR)
@@ -592,6 +696,19 @@ socket.create_connection=_isolated
                 self.assertNotEqual(run.returncode, 0, run.stdout)
                 self.assertEqual(journal['state'], 'MANUAL_REVIEW_REQUIRED')
                 self.assertEqual(self.creates, [100001])
+
+    def test_real_tls_201_location_cross_object_and_overflow_are_rejected(self):
+        for mode in ('create_location_other_id', 'create_location_bad_prefix',
+                     'asset_location_wrong_id', 'asset_body_url_wrong_id',
+                     'create_nonfinite_exponent'):
+            with self.subTest(mode=mode):
+                self.creates.clear(); self.assets_remote.clear(); self.calls.clear()
+                (self.dir_case / 'state.json').unlink(missing_ok=True)
+                run, journal = self.invoke(mode)
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+                self.assertEqual(journal['state'], 'MANUAL_REVIEW_REQUIRED')
+                self.assertEqual(self.creates, [100001])
+                self.assertNotIn('DRAFT_STAGED', run.stdout)
 
     def test_real_wire_budget_tag_and_page_jump_prevent_create(self):
         for mode, limits in (('tag_absent', {}), ('jump', {}),
