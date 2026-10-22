@@ -45,7 +45,7 @@ async function main() {
     if (mode === "ownership") {
       const started = await invoke(owner, "terminal_start", {
         command: process.platform === "win32"
-          ? '$line = [Console]::In.ReadLine(); Write-Output "INPUT:$line"'
+          ? '$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput()); $line = $reader.ReadLine(); Write-Output "INPUT:$line"'
           : "read line; printf 'INPUT:%s\\n' \"$line\"",
         cwd: ".", workspace_path: root, permission_mode: "workspace-write",
       });
