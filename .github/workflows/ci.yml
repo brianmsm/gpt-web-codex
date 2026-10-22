@@ -48,6 +48,31 @@ jobs:
         run: command -v xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
       - run: bun run app:smoke
 
+  # Temporary diagnostic only: compare Bun's Windows stdio/process behavior
+  # under the SAME hosted runner and the SAME synthetic GWC policy tests.
+  # Remove this job after deciding whether a runtime update is justified.
+  windows-stdio-runtime-ab:
+    name: Windows stdio runtime A/B (Bun ${{ matrix.bun }})
+    runs-on: windows-latest
+    timeout-minutes: 14
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: ["1.3.14", "1.4.0"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun }}
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile || bun install --frozen-lockfile
+      - name: Reproduce nested interactive PowerShell/stdin ownership
+        shell: pwsh
+        run: bun test --timeout 30000 --test-name-pattern "direct terminal jobs are isolated by authoritative web session ownership" tests/standalone-luna.test.ts
+      - name: Reproduce nested one-shot terminal_exec
+        shell: pwsh
+        run: bun test --timeout 30000 --test-name-pattern "standalone MCP exposes Luna direct and Herdr tools without a turn broker" tests/standalone-luna.test.ts
+
   actionlint:
     runs-on: ubuntu-latest
     steps:
