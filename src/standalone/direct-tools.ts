@@ -27,9 +27,10 @@ import { terminateOwnedProcessTree } from "./process-tree";
 /**
  * The MCP SDK intentionally gives its stdio child a restricted inherited
  * environment. In particular PSModulePath is not on its default allowlist.
- * Windows PowerShell 5.1 can hang before running a script on hosted/headless
- * Windows when this path is missing. Recreate only its standard module search
- * locations for the PowerShell child; do not inherit the caller's full env.
+ * Seed Windows PowerShell's own modules first so built-in commands do not
+ * depend on discovery through unrelated installed modules. Never add the
+ * PowerShell 7 module roots: their Core assemblies are incompatible with 5.1.
+ * Explicit caller paths are preserved; no broader environment is inherited.
  */
 export function windowsPowerShellSpawnEnv(
   env: NodeJS.ProcessEnv,
@@ -43,9 +44,9 @@ export function windowsPowerShellSpawnEnv(
   const userProfile = env.USERPROFILE ||
     (env.HOMEDRIVE && env.HOMEPATH ? env.HOMEDRIVE + env.HOMEPATH : undefined);
   const searchPaths = [
+    win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
     ...(userProfile ? [win32.join(userProfile, "Documents", "WindowsPowerShell", "Modules")] : []),
     win32.join(programFiles, "WindowsPowerShell", "Modules"),
-    win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
   ];
   return { ...env, PSModulePath: searchPaths.join(";") };
 }
