@@ -66,6 +66,15 @@ jobs:
           bun-version: ${{ matrix.bun }}
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile || bun install --frozen-lockfile
+      - name: Test direct Node client with Bun GWC server (no Bun test worker)
+        shell: pwsh
+        run: |
+          $BunExe = (Get-Command bun -ErrorAction Stop).Source
+          $Cli = Join-Path $PWD "src/cli.ts"
+          node tests/fixtures/windows-stdio-node-terminal.mjs $BunExe $Cli ownership
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/fixtures/windows-stdio-node-terminal.mjs $BunExe $Cli exec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Reproduce nested interactive PowerShell/stdin ownership
         shell: pwsh
         run: bun test --timeout 30000 --test-name-pattern "direct terminal jobs are isolated by authoritative web session ownership" tests/standalone-luna.test.ts
