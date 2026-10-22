@@ -24,6 +24,29 @@ import sharp from "sharp";
 import type { LunaSandbox } from "./types";
 import { terminateOwnedProcessTree } from "./process-tree";
 
+/**
+ * Windows PowerShell 5.1 accepts UTF-16LE EncodedCommand without command-line
+ * quotation reparsing. The scriptblock preserves a trailing # comment, and
+ * redirected stdin remains available to persistent terminal_start jobs.
+ */
+export function buildWindowsPowerShellArgs(command: string): string[] {
+  const script = [
+    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
+    "$global:LASTEXITCODE = $null",
+    `& {
+${command}
+}`,
+    "$__gptWebCodexSuccess = $?",
+    "$__gptWebCodexExitCode = $LASTEXITCODE",
+    "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",
+    "if (-not $__gptWebCodexSuccess) { exit 1 }",
+  ].join("; ");
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64")];
+}
+
 const MAX_DIRECT_IMAGE_BYTES = 20_000_000;
 const MAX_SOURCE_IMAGE_BYTES = 50_000_000;
 const MODEL_IMAGE_MAX_DIMENSION = 1_600;
@@ -982,23 +1005,8 @@ export class DirectToolService {
     const resolvedCwd = resolveScopedPath(cwd, workspace, mode);
     const id = randomUUID();
     const shell = process.platform === "win32" ? "powershell.exe" : "/bin/sh";
-    const powershellCommand = [
-      "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
-      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-      "$OutputEncoding = [Console]::OutputEncoding",
-      "$global:LASTEXITCODE = $null",
-      // A PowerShell '#' comment must never swallow the closing script block.
-      // Preserve the user's exact command, but put its delimiter on a new line.
-      `& {
-${command}
-}`,
-      "$__gptWebCodexSuccess = $?",
-      "$__gptWebCodexExitCode = $LASTEXITCODE",
-      "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",
-      "if (-not $__gptWebCodexSuccess) { exit 1 }",
-    ].join("; ");
     const args = process.platform === "win32"
-      ? ["-NoLogo", "-NoProfile", "-Command", powershellCommand]
+      ? buildWindowsPowerShellArgs(command)
       : ["-lc", command];
     const child = spawn(shell, args, { cwd: resolvedCwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const job: TerminalJob = {

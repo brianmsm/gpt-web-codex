@@ -912,6 +912,11 @@ export async function runChatGptMcpServer(options: {
     });
     requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started, boundaryDispatchId);
 
+    // A one-shot terminal_exec has no stdin channel. Close its pipe promptly:
+    // Windows PowerShell can wait indefinitely for EOF when -Command receives
+    // redirected stdin even after the script finishes, yielding a false
+    // "running" result. Interactive terminal_start still retains stdin.
+    direct.writeTerminalStdin(started.id, "", true, webSessionId);
     const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms, webSessionId);
     if (completed.status !== "running") {
       requestTrace.recordLifecycle({
