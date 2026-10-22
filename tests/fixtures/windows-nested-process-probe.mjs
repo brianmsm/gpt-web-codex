@@ -18,6 +18,8 @@ const CASES = [
   "gwc-wrapper-sdk-env", "gwc-wrapper-sdk-env-temp-cwd",
   "gwc-wrapper-sdk-env-plus-psmodulepath",
   "gwc-wrapper-sdk-env-plus-programdata",
+  "gwc-wrapper-sdk-env-plus-default-psmodules",
+  "gwc-wrapper-sdk-env-plus-pwsh-module-dir",
 ];
 const script = [
   "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
@@ -34,7 +36,7 @@ const script = [
 async function childArgs(key) {
   if (key.startsWith("gwc-wrapper-")) {
     // Use the real reviewed GWC argument builder, never a rewritten copy.
-    const { buildWindowsPowerShellArgs } =
+    const { buildWindowsPowerShellArgs, windowsPowerShellSpawnEnv } =
       await import("../../src/standalone/direct-tools.ts");
     const interactive = key !== "gwc-wrapper-short";
     const userScript = interactive
@@ -45,8 +47,22 @@ async function childArgs(key) {
     const cwd = (key === "gwc-wrapper-temp-cwd" ||
       key === "gwc-wrapper-sdk-env-temp-cwd")
       ? mkdtempSync(join(tmpdir(), "gwc-node-terminal-mcp-")) : undefined;
+    let configuredEnv;
+    if (key === "gwc-wrapper-sdk-env-plus-default-psmodules" ||
+        key === "gwc-wrapper-sdk-env-plus-pwsh-module-dir") {
+      configuredEnv = windowsPowerShellSpawnEnv(process.env, "win32");
+      if (key === "gwc-wrapper-sdk-env-plus-pwsh-module-dir") {
+        const pf = configuredEnv.ProgramFiles || configuredEnv.PROGRAMFILES ||
+          "C:\\Program Files";
+        const base = pf.replace(/[\\/]$/, "");
+        const extra = [base + "\\PowerShell\\Modules",
+          base + "\\PowerShell\\7\\Modules"].join(";");
+        configuredEnv = { ...configuredEnv, PSModulePath:
+          extra + ";" + configuredEnv.PSModulePath };
+      }
+    }
     return ["powershell.exe", buildWindowsPowerShellArgs(userScript),
-      interactive ? "owner\n" : "", cwd];
+      interactive ? "owner\n" : "", cwd, configuredEnv];
   }
   if (key === "node-control") {
     return ["node", ["-e", "process.stdout.write('GWC_PROBE_READY')"], ""];
@@ -128,9 +144,9 @@ if (process.platform !== "win32") {
 } else if (process.argv[2] === "inner") {
   const key = process.argv[3];
   if (!CASES.includes(key)) throw Error("Case is not on the static allowlist");
-  const [cmd, args, input, cwd] = await childArgs(key);
+  const [cmd, args, input, cwd, envOverride] = await childArgs(key);
   try {
-    const result = await observe(key, cmd, args, input, 6500, cwd);
+    const result = await observe(key, cmd, args, input, 6500, cwd, envOverride);
     console.log("GWC_NESTED_PROBE=" + JSON.stringify(result));
   } finally {
     if (cwd) rmSync(cwd, { recursive: true, force: true });
@@ -138,6 +154,13 @@ if (process.platform !== "win32") {
 } else {
   const bunExe = process.argv[2];
   if (!bunExe) throw Error("Need the Bun executable path");
+  const paths = (process.env.PSModulePath || "").split(";").filter(Boolean);
+  console.log("GWC_PS_MODULE_CATEGORY_AUDIT=" + JSON.stringify({
+    entry_count: paths.length,
+    has_windows_ps: paths.some(x => /WindowsPowerShell[\\/]Modules/i.test(x)),
+    has_system_module: paths.some(x => /WindowsPowerShell[\\/]v1[.]0[\\/]Modules/i.test(x)),
+    has_pwsh_core: paths.some(x => /[\\/]PowerShell[\\/](?:7[\\/])?Modules/i.test(x)),
+  }));
   for (const key of CASES) {
     let environment;
     if (key.startsWith("gwc-wrapper-sdk-env")) {
