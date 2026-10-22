@@ -86,8 +86,6 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    # Configure protected reviewers and RELEASE_APPROVED_COMMIT_SHA here before any tag push.
-    environment: release-staging
     permissions:
       contents: write
     steps:
@@ -108,9 +106,7 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
-      - name: Verify all four platform builds match independently approved source SHA
-        env:
-          RELEASE_APPROVED_COMMIT_SHA: ${{ vars.RELEASE_APPROVED_COMMIT_SHA }}
+      - name: Verify all four platform builds match the checked-out tag event
         run: python scripts/release_build_identity.py verify --directory release-assets
       - name: Verify release tag matches package version
         run: |
@@ -160,9 +156,7 @@ jobs:
             echo "checksums.txt is missing entries for:$missing" >&2
             exit 1
           fi
-      - name: Stage fresh checksummed GitHub Release draft (manual review required)
+      - name: Stage fresh checksummed GitHub Release draft (never auto-publish)
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_APPROVED_COMMIT_SHA: ${{ vars.RELEASE_APPROVED_COMMIT_SHA }}
-          RELEASE_STAGE_JOURNAL: ${{ runner.temp }}/release-stage-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash scripts/stage-release-draft.sh release-assets

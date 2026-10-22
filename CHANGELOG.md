@@ -17,7 +17,7 @@ All maintained release versions follow [Semantic Versioning](https://semver.org/
 - **Operational recovery:** generic diagnostics and safe recovery semantics; distinct job/lifecycle boundaries and explicit no-blind-replay guidance.
 - **Project identity and docs:** a rewritten shell-first README, fork-specific package/update URLs and explicit warnings about the absence of general destructive-command protection.
 - **Dependency security:** upgraded the MCP SDK to 1.32.1, sharp to 0.35.5 and vulnerable transitive HTTP/URL dependencies. The pinned Bun audit reports **no known vulnerabilities** at the time of release testing.
-- **Release integrity:** draft-first publishing now rejects all pre-existing releases, validates the exact local checksum manifest, and checks the remote asset inventory after creating a fresh draft; it does not silently retain stale assets.
+- **Release integrity:** the single-maintainer, draft-first workflow validates tag/source identity, checks the exact local checksum manifest and compares uploaded asset sizes and SHA-256 digests. It never publishes automatically; ambiguous drafts require manual review. The earlier high-assurance publisher is retained on an archive branch.
 
 ### Security warning
 

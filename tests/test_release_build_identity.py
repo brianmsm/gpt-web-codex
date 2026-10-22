@@ -22,8 +22,7 @@ class BuildIdentityTests(unittest.TestCase):
         self.assets = self.path / "artifacts"
         self.assets.mkdir()
         self.env = dict(os.environ, GITHUB_SHA=HEAD,
-                        GITHUB_RUN_ID="234567", GITHUB_RUN_ATTEMPT="2",
-                        RELEASE_APPROVED_COMMIT_SHA=HEAD)
+                        GITHUB_RUN_ID="234567", GITHUB_RUN_ATTEMPT="2")
 
     def call(self, *args, env=None):
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args],
@@ -37,7 +36,7 @@ class BuildIdentityTests(unittest.TestCase):
     def verify(self):
         return self.call("verify", "--directory", str(self.assets))
 
-    def test_exact_four_records_are_verified_for_one_approved_head_and_run(self):
+    def test_exact_four_records_are_verified_for_one_event_head_and_run(self):
         self.populate()
         done = self.verify()
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -69,7 +68,7 @@ class BuildIdentityTests(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((source / rel).read_bytes())
 
-    def test_source_commit_or_run_or_approved_value_mismatch_is_rejected(self):
+    def test_source_commit_or_run_mismatch_is_rejected(self):
         self.populate()
         file = self.assets / provenance.manifest_name("macos-15")
         original = json.loads(file.read_text())
@@ -80,9 +79,7 @@ class BuildIdentityTests(unittest.TestCase):
             self.assertEqual(self.verify().returncode, 3, key)
         file.write_text(json.dumps(original))
         self.assertEqual(self.verify().returncode, 0)
-        bad_env = dict(self.env, RELEASE_APPROVED_COMMIT_SHA="b" * 40)
-        self.assertEqual(self.call("verify", "--directory", str(self.assets), env=bad_env).returncode, 3)
-        bad_env = dict(self.env, GITHUB_SHA="b" * 40, RELEASE_APPROVED_COMMIT_SHA="b" * 40)
+        bad_env = dict(self.env, GITHUB_SHA="b" * 40)
         self.assertEqual(self.call("verify", "--directory", str(self.assets), env=bad_env).returncode, 3)
 
     def test_ambiguity_schema_unknown_runner_and_duplicate_json_rejected(self):

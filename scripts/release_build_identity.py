@@ -35,20 +35,13 @@ def fail(message: str) -> None:
     raise ValueError(message)
 
 
-def validated_environment(*, approved: bool) -> dict:
+def validated_environment() -> dict:
     values = {}
     for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         item = os.environ.get(key, "")
         if not (SHA.fullmatch(item) if key == "GITHUB_SHA" else NUMBER.fullmatch(item)):
             fail("Invalid GitHub workflow identity")
         values[key] = item
-    if approved:
-        item = os.environ.get("RELEASE_APPROVED_COMMIT_SHA", "")
-        if not SHA.fullmatch(item):
-            fail("Missing independently approved SHA")
-        if item != values["GITHUB_SHA"]:
-            fail("The tag-push commit differs from the approved release commit")
-        values["RELEASE_APPROVED_COMMIT_SHA"] = item
     result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                             text=True, check=True, timeout=10)
     if result.stdout.strip() != values["GITHUB_SHA"]:
@@ -117,7 +110,7 @@ def recorded_files(root: Path, runner: str) -> dict[str, str]:
 
 
 def record(runner: str, output: Path, artifact_root: Path) -> None:
-    env = validated_environment(approved=False)
+    env = validated_environment()
     if output.name != manifest_name(runner) or output.is_symlink() or output.exists():
         fail("Unsafe or existing release source manifest path")
     files = recorded_files(artifact_root, runner)
@@ -133,7 +126,7 @@ def record(runner: str, output: Path, artifact_root: Path) -> None:
 
 
 def verify(directory: Path) -> None:
-    env = validated_environment(approved=True)
+    env = validated_environment()
     if not directory.is_dir() or directory.is_symlink():
         fail("Missing release assets directory")
     existing = {p.name for p in directory.iterdir() if p.name.startswith("release-source-")}
@@ -144,7 +137,7 @@ def verify(directory: Path) -> None:
     for runner in RUNNERS:
         record = read_strict(directory / manifest_name(runner))
         expected = {
-            "schema": SCHEMA, "runner": runner, "source_sha": env["RELEASE_APPROVED_COMMIT_SHA"],
+            "schema": SCHEMA, "runner": runner, "source_sha": env["GITHUB_SHA"],
             "workflow_sha": env["GITHUB_SHA"], "run_id": env["GITHUB_RUN_ID"],
             "run_attempt": env["GITHUB_RUN_ATTEMPT"],
         }

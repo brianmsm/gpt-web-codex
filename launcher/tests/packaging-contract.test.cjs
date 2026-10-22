@@ -98,15 +98,15 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   const stageDraft = fs.readFileSync(path.join(repositoryRoot, "scripts", "stage-release-draft.sh"), "utf8");
   const stageClient = fs.readFileSync(path.join(repositoryRoot, "scripts", "stage_release_draft.py"), "utf8");
   assert.match(release, /bash scripts\/stage-release-draft\.sh release-assets/);
-  assert.match(release, /RELEASE_APPROVED_COMMIT_SHA/);
+  assert.doesNotMatch(release, /release-staging|RELEASE_APPROVED_COMMIT_SHA/);
   assert.match(stageDraft, /exec python3 -B/);
   assert.match(stageDraft, /stage_release_draft\.py/);
-  assert.match(stageClient, /Existing release or title collision; refusing create/);
-  assert.match(stageClient, /validate_tag\(rest, stem, tag, approved, preflight=True\)/);
-  assert.match(stageClient, /CREATE_ID_CONFIRMED/);
+  assert.match(stageClient, /"gh", "release", "create"/);
+  assert.match(stageClient, /"--verify-tag"/);
+  assert.match(stageClient, /"--draft"/);
   assert.match(stageClient, /DRAFT_STAGED_ASSET_INVENTORY_VERIFIED/);
   assert.match(stageClient, /DRAFT_STAGED_BINARY_DIGEST_VERIFIED/);
-  assert.doesNotMatch(stageDraft, /gh release create|gh release view|gh release upload|--draft=false/);
+  assert.doesNotMatch(stageClient, /"release", "publish"/);
 });
 
 test("release publishes the repository demo as a checksummed versioned asset", () => {

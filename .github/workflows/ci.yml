@@ -42,6 +42,11 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.3.14 -GitHubEnv $env:GITHUB_ENV
       - run: bun run verify
+      - name: Test draft release safety offline
+        if: runner.os == 'Linux'
+        run: |
+          python3 -B -m unittest discover -s tests -p 'test_release_build_identity.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_stage_release_draft.py' -q
       - run: bun run app:package
       - name: Ensure virtual display is available
         if: runner.os == 'Linux'
