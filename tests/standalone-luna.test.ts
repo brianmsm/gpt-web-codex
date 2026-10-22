@@ -68,6 +68,37 @@ function testMcpTransport(statePath: string): StdioClientTransport {
   });
 }
 
+/**
+ * Node is the supported runtime for the MCP SDK's stdio client on Windows.
+ * The tested GWC server still runs in Bun; no production code path changes.
+ */
+async function verifyWindowsTerminalWithNodeClient(mode: "ownership" | "exec"): Promise<void> {
+  const child = Bun.spawn({
+    cmd: [
+      "node",
+      join(import.meta.dir, "fixtures", "windows-stdio-node-terminal.mjs"),
+      process.execPath,
+      join(import.meta.dir, "..", "src", "cli.ts"),
+      mode,
+    ],
+    cwd: join(import.meta.dir, ".."),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (exit !== 0) {
+    // Node fixture only contains synthetic sessions and bounded error messages.
+    console.error("GWC_WINDOWS_TERMINAL_NODE_FIXTURE_FAILURE=" + stderr.slice(-400));
+  }
+  expect(exit).toBe(0);
+  expect(stdout).toContain("GWC_NODE_TERMINAL_" + mode.toUpperCase() + "_PASS");
+}
+
 async function inspectBindingThroughFreshMcp(statePath: string, webSessionId: string) {
   const transport = testMcpTransport(statePath);
   const client = new Client({ name: "webgpt-persistence-test", version: "1.0.0" });
@@ -772,6 +803,10 @@ test("equivalent terminal starts remain independent local jobs", async () => {
 });
 
 test("direct terminal jobs are isolated by authoritative web session ownership", async () => {
+  if (process.platform === "win32") {
+    await verifyWindowsTerminalWithNodeClient("ownership");
+    return;
+  }
   const root = mkdtempSync(join(tmpdir(), "webgpt-terminal-session-owner-"));
   const statePath = join(root, "state.json");
   const transport = testMcpTransport(statePath);
@@ -780,9 +815,7 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
   const sessionB = "terminal-owner-b";
   try {
     await client.connect(transport);
-    const command = process.platform === "win32"
-      ? "$line = [Console]::In.ReadLine(); Write-Output \"INPUT:$line\""
-      : "read line; printf 'INPUT:%s\\n' \"$line\"";
+    const command = "read line; printf 'INPUT:%s\\n' \"$line\"";
     const started = await client.callTool({
       name: "terminal_start",
       arguments: { command, cwd: ".", workspace_path: root, permission_mode: "workspace-write" },
@@ -841,11 +874,6 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
       statusPolls += 1;
       if ((final.structuredContent as { status?: string }).status !== "running" || Date.now() >= deadline) break;
       await Bun.sleep(125);
-    }
-    if (process.platform === "win32" && (final.structuredContent as { status?: string }).status === "running") {
-      const state = final.structuredContent as { stdout?: string; stderr?: string };
-      console.error("GWC_WINDOWS_TERMINAL_OWNER_WAIT_EXPIRED polls=" + statusPolls +
-        " stdout_bytes=" + (state.stdout?.length ?? 0) + " stderr_bytes=" + (state.stderr?.length ?? 0));
     }
     expect(final.isError).not.toBe(true);
     expect(final.structuredContent).toMatchObject({ status: "completed" });
@@ -1080,34 +1108,41 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
     });
     expect(readOnlyEdit.isError).toBe(true);
     expect(readFileSync(join(root, "mcp-edit.txt"), "utf8")).toBe("alpha PATCHED\n");
-    const executedTerminal = await client.callTool({
-      name: "terminal_exec",
-      arguments: {
-        command: process.platform === "win32" ? "Write-Output 'MCP_TERMINAL_OK'" : "printf 'MCP_TERMINAL_OK\\n'",
-        cwd: ".",
-        workspace_path: root,
-        permission_mode: "workspace-write",
-        wait_timeout_ms: 5_000,
-      },
-    });
-    expect(executedTerminal.isError).not.toBe(true);
-    // terminal_exec is bounded and may legitimately return a running job.
-    // Reacquire the same job_id through terminal_status, never resubmit it.
-    let terminal = executedTerminal.structuredContent as {
-      status: string; job_id: string; web_session_id: string; exit_code: number | null; stdout: string;
-    };
-    const terminalDeadline = Date.now() + 20_000;
-    while (terminal.status === "running" && Date.now() < terminalDeadline) {
-      await Bun.sleep(75);
-      const current = await client.callTool({
-        name: "terminal_status",
-        arguments: { job_id: terminal.job_id, web_session_id: terminal.web_session_id },
+    if (process.platform === "win32") {
+      // Preserve native MCP terminal execution coverage through the SDK's
+      // supported Windows client runtime; all other GWC tools remain tested
+      // over the original Bun-hosted MCP connection in this test.
+      await verifyWindowsTerminalWithNodeClient("exec");
+    } else {
+      const executedTerminal = await client.callTool({
+        name: "terminal_exec",
+        arguments: {
+          command: "printf 'MCP_TERMINAL_OK\\n'",
+          cwd: ".",
+          workspace_path: root,
+          permission_mode: "workspace-write",
+          wait_timeout_ms: 5_000,
+        },
       });
-      expect(current.isError).not.toBe(true);
-      terminal = current.structuredContent as typeof terminal;
+      expect(executedTerminal.isError).not.toBe(true);
+      // terminal_exec is bounded and may legitimately return a running job.
+      // Reacquire the same job_id through terminal_status, never resubmit it.
+      let terminal = executedTerminal.structuredContent as {
+        status: string; job_id: string; web_session_id: string; exit_code: number | null; stdout: string;
+      };
+      const terminalDeadline = Date.now() + 20_000;
+      while (terminal.status === "running" && Date.now() < terminalDeadline) {
+        await Bun.sleep(75);
+        const current = await client.callTool({
+          name: "terminal_status",
+          arguments: { job_id: terminal.job_id, web_session_id: terminal.web_session_id },
+        });
+        expect(current.isError).not.toBe(true);
+        terminal = current.structuredContent as typeof terminal;
+      }
+      expect(terminal).toMatchObject({ status: "completed", exit_code: 0 });
+      expect(terminal.stdout).toContain("MCP_TERMINAL_OK");
     }
-    expect(terminal).toMatchObject({ status: "completed", exit_code: 0 });
-    expect(terminal.stdout).toContain("MCP_TERMINAL_OK");
     const createdDirectory = await client.callTool({
       name: "file_create_directory",
       arguments: {
