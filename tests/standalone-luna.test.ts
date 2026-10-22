@@ -609,7 +609,12 @@ test("Luna preserves evidence when cancellation is requested before later comple
       "setTimeout(()=>process.exit(0),20);",
       "},100);",
     ].join("");
-    return spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    // Model a child that ignores cancellation, irrespective of host OS.
+    // On Windows SIGTERM terminates a real subprocess immediately, whereas
+    // POSIX can ignore it; the purpose here is to preserve late event evidence.
+    child.kill = (() => true) as typeof child.kill;
+    return child;
   }, join(root, "logs"), process.execPath);
   try {
     const job = manager.start({ webSessionId: "chatgpt:cancel-before-complete", prompt: "wait after cancel", cwd: root });
@@ -796,7 +801,7 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
 
     const crossStdin = await client.callTool({
       name: "terminal_write_stdin",
-      arguments: { job_id: startedContent.job_id, input: "intrusion\\n", close: true },
+      arguments: { job_id: startedContent.job_id, input: "intrusion\n", close: true },
       _meta: { "openai/session": sessionB },
     });
     expect(crossStdin.isError).toBe(true);
@@ -818,12 +823,12 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
 
     const ownerWrite = await client.callTool({
       name: "terminal_write_stdin",
-      arguments: { job_id: startedContent.job_id, input: "owner\\n", close: true },
+      arguments: { job_id: startedContent.job_id, input: "owner\n", close: true },
       _meta: { "openai/session": sessionA },
     });
     expect(ownerWrite.isError).not.toBe(true);
     let final = ownerStatus;
-    for (let i = 0; i < 100; i += 1) {
+    for (let i = 0; i < 450; i += 1) {
       final = await client.callTool({
         name: "terminal_status", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionA },
       });

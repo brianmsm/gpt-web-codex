@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   statSync,
@@ -20,7 +21,7 @@ afterEach(() => {
 });
 
 function workspace(): string {
-  const root = mkdtempSync(join(tmpdir(), "gwc-browser-upload-test-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gwc-browser-upload-test-")));
   roots.push(root);
   const path = join(root, "workspace");
   mkdirSync(path);

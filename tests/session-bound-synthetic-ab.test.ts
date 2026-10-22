@@ -5,6 +5,12 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// These three live-process fixtures launch executable Python scripts using
+// Unix shebangs, execve and chmod/fchmod checks. They are not a Windows MCP
+// deployment target. A platform-neutral RoleSessionGuard integration test
+// below still asserts the same cross-role deny-by-default contract on Windows.
+const posixFixtureTest = process.platform === "win32" ? test.skip : test;
+
 const root = join(import.meta.dir, "..");
 const prepareScript = join(root, "scripts", "diagnostics", "prepare-synthetic-ab-connectors.py");
 const enrollmentScript = join(root, "scripts", "diagnostics", "bind-synthetic-rater-session.py");
@@ -22,7 +28,10 @@ function createLab() {
     cmd: ["python3", "-B", prepareScript, "--lab-dir", lab, "--bun", process.execPath],
     stdout: "pipe", stderr: "pipe",
   });
-  expect(launched.exitCode).toBe(0);
+  if (launched.exitCode !== 0) {
+    throw new Error("Synthetic fixture preparation failed (" + launched.exitCode
+      + "): " + launched.stderr.toString().slice(0, 500));
+  }
   return { folder, lab };
 }
 
@@ -69,7 +78,7 @@ function candidate(response: Awaited<ReturnType<typeof call>>, role: "A" | "B") 
   return fingerprint;
 }
 
-test("two session-locked MCPs deny all data before enrollment, survive enrollment and block real cross-session calls", async () => {
+posixFixtureTest("two session-locked MCPs deny all data before enrollment, survive enrollment and block real cross-session calls", async () => {
   const { folder, lab } = createLab();
   const opened: Client[] = [];
   try {
@@ -161,7 +170,7 @@ test("two session-locked MCPs deny all data before enrollment, survive enrollmen
   }
 });
 
-test("supervisor enrollment is immutable without replace and protected-file tampering fails closed", async () => {
+posixFixtureTest("supervisor enrollment is immutable without replace and protected-file tampering fails closed", async () => {
   const { folder, lab } = createLab();
   let client: Client | undefined;
   try {
@@ -206,7 +215,7 @@ test("supervisor enrollment is immutable without replace and protected-file tamp
   }
 });
 
-test("role session enrollment and keyed identity remain valid across MCP process restart", async () => {
+posixFixtureTest("role session enrollment and keyed identity remain valid across MCP process restart", async () => {
   const { folder, lab } = createLab();
   let client: Client | undefined;
   try {

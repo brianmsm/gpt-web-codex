@@ -328,6 +328,13 @@ function stagedMutationPath(path: string, label: string): string {
   return resolve(dirname(path), `.${basename(path)}.gwc-${label}-${randomUUID()}.tmp`);
 }
 
+// Per-service filesystem syscall seam. Production always uses the real Node
+// filesystem; tests can inject deterministic EEXIST/rename failures on macOS
+// and Windows without monkeypatching ESM named imports or global process state.
+export type DirectTextMutationIO = Pick<typeof import("node:fs"),
+  "writeFileSync" | "renameSync" | "linkSync">;
+const defaultTextMutationIO: DirectTextMutationIO = { writeFileSync, renameSync, linkSync };
+
 const activeTextMutationPaths = new Set<string>();
 
 function withTextMutationLocks<T>(paths: string[], operation: string, run: () => T): T {
@@ -344,15 +351,15 @@ function withTextMutationLocks<T>(paths: string[], operation: string, run: () =>
   }
 }
 
-function commitTextMutations(plans: PreparedTextMutation[], operation: string): void {
+function commitTextMutations(plans: PreparedTextMutation[], operation: string, io: DirectTextMutationIO): void {
   const changed = plans.filter(plan => !plan.original.equals(plan.updated));
   if (changed.length === 0) return;
   withTextMutationLocks(changed.map(plan => plan.path), operation, () => {
-    commitLockedTextMutations(changed, operation);
+    commitLockedTextMutations(changed, operation, io);
   });
 }
 
-function commitLockedTextMutations(changed: PreparedTextMutation[], operation: string): void {
+function commitLockedTextMutations(changed: PreparedTextMutation[], operation: string, io: DirectTextMutationIO): void {
   for (const plan of changed) {
     const current = readMutationBytes(plan.path);
     if (!current.equals(plan.original)) {
@@ -377,8 +384,8 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
 
   try {
     for (const plan of staged) {
-      writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
-      writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
+      io.writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
+      io.writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
       chmodSync(plan.updatedTemp, plan.mode);
       chmodSync(plan.rollbackTemp, plan.mode);
     }
@@ -400,7 +407,7 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
       if (!current.equals(plan.original)) {
         throw new Error(`${operation} aborted because the file changed before commit: ${plan.path}`);
       }
-      renameSync(plan.updatedTemp, plan.path);
+      io.renameSync(plan.updatedTemp, plan.path);
       touched.push(plan);
     }
   } catch (error) {
@@ -420,7 +427,7 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
           );
           continue;
         }
-        renameSync(plan.rollbackTemp, plan.path);
+        io.renameSync(plan.rollbackTemp, plan.path);
       } catch (rollbackError) {
         rollbackErrors.push(
           `${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}${preserveRollback(plan)}`,
@@ -438,19 +445,19 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
   cleanup();
 }
 
-function commitNewTextMutation(path: string, updated: Buffer, operation: string): void {
+function commitNewTextMutation(path: string, updated: Buffer, operation: string, io: DirectTextMutationIO): void {
   withTextMutationLocks([path], operation, () => {
     if (pathEntryExists(path)) {
       throw new Error(`${operation} aborted because the target appeared before creation: ${path}`);
     }
     const updatedTemp = stagedMutationPath(path, "updated");
     try {
-      writeFileSync(updatedTemp, updated, { flag: "wx" });
+      io.writeFileSync(updatedTemp, updated, { flag: "wx" });
       if (pathEntryExists(path)) {
         throw new Error(`${operation} aborted because the target appeared during staging: ${path}`);
       }
       try {
-        linkSync(updatedTemp, path);
+        io.linkSync(updatedTemp, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
           throw new Error(`${operation} aborted because the target appeared before publication: ${path}`, { cause: error });
@@ -651,6 +658,8 @@ function applyUnifiedHunks(path: string, text: string, hunks: UnifiedDiffHunk[])
 export class DirectToolService {
   private readonly terminals = new Map<string, TerminalJob>();
 
+  constructor(private readonly textMutationIO: DirectTextMutationIO = defaultTextMutationIO) {}
+
   shutdown(): void {
     for (const job of this.terminals.values()) {
       if (job.status !== "running" || !job.child) continue;
@@ -827,7 +836,7 @@ export class DirectToolService {
       reserveMutationTransactionBytes(0, source.path, source.bytes.length, updatedBytes, "File write");
       assertValidMutationText(content, source.path);
       const updated = Buffer.from(content, "utf8");
-      commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write");
+      commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write", this.textMutationIO);
       return { path: requestedTarget, bytes: updated.length };
     }
 
@@ -835,7 +844,7 @@ export class DirectToolService {
     reserveMutationTransactionBytes(0, target, 0, updatedBytes, "File write");
     assertValidMutationText(content, target);
     const updated = Buffer.from(content, "utf8");
-    commitNewTextMutation(target, updated, "File write");
+    commitNewTextMutation(target, updated, "File write", this.textMutationIO);
     return { path: requestedTarget, bytes: updated.length };
   }
 
@@ -886,7 +895,7 @@ export class DirectToolService {
     assertValidMutationText(updatedText, source.path);
     const updated = Buffer.from(updatedText, "utf8");
     reserveMutationTransactionBytes(0, source.path, source.bytes.length, updated.length, "File edit");
-    commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
+    commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit", this.textMutationIO);
     return {
       path: source.path,
       replacements: occurrences,
@@ -926,7 +935,7 @@ export class DirectToolService {
       });
     }
 
-    commitTextMutations(plans, "File patch");
+    commitTextMutations(plans, "File patch", this.textMutationIO);
     return {
       files_applied: files.length,
       hunks_applied: files.reduce((sum, file) => sum + file.hunks, 0),
@@ -978,7 +987,11 @@ export class DirectToolService {
       "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
       "$OutputEncoding = [Console]::OutputEncoding",
       "$global:LASTEXITCODE = $null",
-      `& { ${command} }`,
+      // A PowerShell '#' comment must never swallow the closing script block.
+      // Preserve the user's exact command, but put its delimiter on a new line.
+      `& {
+${command}
+}`,
       "$__gptWebCodexSuccess = $?",
       "$__gptWebCodexExitCode = $LASTEXITCODE",
       "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",

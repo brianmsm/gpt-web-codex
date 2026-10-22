@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
@@ -10,6 +11,13 @@ import {
   type HerdrSessionInfo,
   type HerdrWireRequest,
 } from "../src/standalone/herdr-client";
+
+function socketFixturePath(root: string): string {
+  // Test the same newline-framed stream using a native Windows named pipe.
+  return process.platform === "win32"
+    ? String.raw`\\.\pipe\gwc-herdr-${randomUUID()}`
+    : join(root, "herdr.sock");
+}
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -210,7 +218,7 @@ test("unknown future Herdr protocol 23 refuses mutations without sending an oper
 test("socket transport speaks Herdr newline-delimited JSON and validates a live response", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-socket-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
+  const socketPath = socketFixturePath(root);
   const server = createServer(socket => {
     socket.setEncoding("utf8");
     let input = "";
@@ -236,8 +244,12 @@ test("socket transport speaks Herdr newline-delimited JSON and validates a live 
 test("socket transport rejects malformed Herdr responses", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-malformed-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
-  const server = createServer(socket => socket.end("not-json\n"));
+  const socketPath = socketFixturePath(root);
+  const server = createServer(socket => {
+    // Wait for a complete request before replying/closing. On Windows a
+    // named-pipe close can otherwise race the first client read.
+    socket.once("data", () => socket.end("not-json\n"));
+  });
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -253,7 +265,7 @@ test("socket transport rejects malformed Herdr responses", async () => {
 test("socket transport reports timeout as unknown and performs no cleanup", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-timeout-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
+  const socketPath = socketFixturePath(root);
   const server = createServer(() => {});
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
@@ -352,7 +364,7 @@ test("workspace open creates without focus when no workspace owns the cwd", asyn
   const opened = await client.openWorkspace("test", "/repo/new", "worker", fullAccess);
   expect(opened.created).toBe(true);
   expect(opened.workspace).toMatchObject({ workspace_id: "w7" });
-  expect(requests[1]?.params).toMatchObject({ cwd: "/repo/new", label: "worker", focus: false });
+  expect(requests[1]?.params).toMatchObject({ cwd: resolve("/repo/new"), label: "worker", focus: false });
 });
 
 test("workspace open refuses an ambiguous cwd rather than relying on focus", async () => {
@@ -373,7 +385,7 @@ test("workspace open refuses an ambiguous cwd rather than relying on focus", asy
 test("worktree creation returns the workspace tab pane and worktree identities", async () => {
   const client = fakeClient(request => {
     expect(request.method).toBe("worktree.create");
-    expect(request.params).toMatchObject({ cwd: "/repo/main", branch: "feat/a", base: "main", path: "/repo/a", focus: false });
+    expect(request.params).toMatchObject({ cwd: resolve("/repo/main"), branch: "feat/a", base: "main", path: resolve("/repo/a"), focus: false });
     return {
       type: "worktree_created",
       workspace: { workspace_id: "wA" },
@@ -392,13 +404,13 @@ test("tab and pane creation target explicit workspace and pane ids", async () =>
   const client = fakeClient(request => {
     methods.push(request.method);
     if (request.method === "tab.create") {
-      expect(request.params).toMatchObject({ workspace_id: "wA", cwd: "/repo/a", label: "tests", focus: false });
+      expect(request.params).toMatchObject({ workspace_id: "wA", cwd: resolve("/repo/a"), label: "tests", focus: false });
       return { type: "tab_created", tab: { tab_id: "wA:t2", workspace_id: "wA" }, root_pane: { pane_id: "wA:p2", terminal_id: "term2" } };
     }
-    expect(request.params).toMatchObject({ target_pane_id: "wA:p2", direction: "right", cwd: "/repo/a", focus: false });
+    expect(request.params).toMatchObject({ target_pane_id: "wA:p2", direction: "right", cwd: resolve("/repo/a"), focus: false });
     return { type: "pane_info", pane: { pane_id: "wA:p3", terminal_id: "term3", workspace_id: "wA", tab_id: "wA:t2" } };
   });
-  const tab = await client.createTab("test", { workspaceId: "wA", cwd: "/repo/a", label: "tests" }, fullAccess);
+  const tab = await client.createTab("test", { workspaceId: "wA", cwd: resolve("/repo/a"), label: "tests" }, fullAccess);
   const pane = await client.splitPane("test", { targetPaneId: "wA:p2", direction: "right", cwd: "/repo/a" }, fullAccess);
   expect(tab.root_pane).toMatchObject({ pane_id: "wA:p2" });
   expect(pane.pane).toMatchObject({ pane_id: "wA:p3" });

@@ -35,7 +35,9 @@ test("generic supervisor binding is explicit, atomic, profile-agnostic and versi
     const parsed = parseSessionCapabilityConfig(JSON.parse(readFileSync(file, "utf8")), file);
     expect(parsed.bindings.get(sessionA)).toBe("no-tools");
     expect(parsed.digest).toBe(first.config_sha256);
-    expect(lstatSync(file).mode & 0o077).toBe(0);
+    // Windows reports synthetic POSIX mode bits for NTFS; the production
+    // validator explicitly uses OS-specific file-security requirements.
+    if (process.platform !== "win32") expect(lstatSync(file).mode & 0o077).toBe(0);
     expect(existsSync(file + ".lock")).toBe(false);
 
     expect(() => bindCapabilityProfile(file, sessionA, "diagnostics-only")).toThrow("--replace");
