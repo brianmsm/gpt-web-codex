@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,8 +62,7 @@ test("PowerShell module path fallback preserves explicit values and skips non-Wi
   expect(windowsPowerShellSpawnEnv({ PATH: "synthetic" }, "linux")).toEqual({ PATH: "synthetic" });
 });
 
-
-test.skipIf(process.platform !== "win32")("limited PowerShell environment cannot load incompatible PowerShell 7 built-ins", () => {
+test.skipIf(process.platform !== "win32")("limited PowerShell environment cannot load incompatible PowerShell 7 built-ins", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-powershell-modules-"));
   try {
     const programFiles = join(root, "Program Files");
@@ -93,19 +92,30 @@ test.skipIf(process.platform !== "win32")("limited PowerShell environment cannot
       "$null = Get-Item -LiteralPath $PSHOME",
       "[Console]::WriteLine('GWC_BUILTIN_MODULES_OK')",
     ].join("; ");
-    const result = spawnSync("powershell.exe", buildWindowsPowerShellArgs(script), {
-      env, encoding: "utf8", windowsHide: true, input: "",
-      timeout: 8_000, maxBuffer: 64 * 1024,
+    const started = performance.now();
+    // Bun's Windows spawnSync timeout can use a stale clock between calls
+    // (oven-sh/bun#33932). Keep the same bounded probe on the async path.
+    const result = await new Promise<{
+      error: ExecFileException | null; status: number | null; stdout: string; stderr: string;
+    }>((resolve) => {
+      const child = execFile("powershell.exe", buildWindowsPowerShellArgs(script), {
+        env, encoding: "utf8", windowsHide: true,
+        timeout: 8_000, maxBuffer: 64 * 1024,
+      }, (error, stdout, stderr) => resolve({ error, status: child.exitCode, stdout, stderr }));
+      child.stdin?.end();
     });
     if (result.status !== 0) {
       console.error("GWC_MODULE_REGRESSION=" + JSON.stringify({
+        elapsedMs: Math.round(performance.now() - started),
         status: result.status,
-        error: result.error?.message,
+        error: result.error?.code,
+        killed: result.error?.killed,
+        signal: result.error?.signal,
         incompatible: result.stderr?.includes("GWC_INCOMPATIBLE_CORE_MODULE_LOADED"),
         wrongOrigin: result.stderr?.includes("GWC_WRONG_BUILTIN_MODULE_ORIGIN"),
       }));
     }
-    expect(result.error).toBeUndefined();
+    expect(result.error).toBeNull();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("GWC_BUILTIN_MODULES_OK");
   } finally {
