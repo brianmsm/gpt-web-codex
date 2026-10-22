@@ -1079,8 +1079,23 @@ test("standalone MCP exposes Luna direct and Herdr tools without a turn broker",
       },
     });
     expect(executedTerminal.isError).not.toBe(true);
-    expect(executedTerminal.structuredContent).toMatchObject({ status: "completed", exit_code: 0 });
-    expect((executedTerminal.structuredContent as { stdout: string }).stdout).toContain("MCP_TERMINAL_OK");
+    // terminal_exec is bounded and may legitimately return a running job.
+    // Reacquire the same job_id through terminal_status, never resubmit it.
+    let terminal = executedTerminal.structuredContent as {
+      status: string; job_id: string; web_session_id: string; exit_code: number | null; stdout: string;
+    };
+    const terminalDeadline = Date.now() + 20_000;
+    while (terminal.status === "running" && Date.now() < terminalDeadline) {
+      await Bun.sleep(75);
+      const current = await client.callTool({
+        name: "terminal_status",
+        arguments: { job_id: terminal.job_id, web_session_id: terminal.web_session_id },
+      });
+      expect(current.isError).not.toBe(true);
+      terminal = current.structuredContent as typeof terminal;
+    }
+    expect(terminal).toMatchObject({ status: "completed", exit_code: 0 });
+    expect(terminal.stdout).toContain("MCP_TERMINAL_OK");
     const createdDirectory = await client.callTool({
       name: "file_create_directory",
       arguments: {

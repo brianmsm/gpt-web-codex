@@ -26,7 +26,7 @@
     "start": "bun run scripts/start-launcher.ts",
     "setup": "bun run src/cli.ts setup",
     "doctor": "bun run src/cli.ts doctor",
-    "test": "bun test --timeout 15000 tests/*.test.ts",
+    "test": "bun test --timeout 30000 tests/*.test.ts",
     "audit": "bun audit",
     "check-version": "bun run scripts/check-version.ts",
     "typecheck": "tsc --noEmit",

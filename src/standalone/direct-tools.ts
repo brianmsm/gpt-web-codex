@@ -25,9 +25,8 @@ import type { LunaSandbox } from "./types";
 import { terminateOwnedProcessTree } from "./process-tree";
 
 /**
- * Windows PowerShell 5.1 accepts UTF-16LE EncodedCommand without command-line
- * quotation reparsing. The scriptblock preserves a trailing # comment, and
- * redirected stdin remains available to persistent terminal_start jobs.
+ * Preserve user scriptblock syntax, including trailing # comments, when
+ * invoking Windows PowerShell 5.1. Stdin is retained by terminal_start.
  */
 export function buildWindowsPowerShellArgs(command: string): string[] {
   const script = [
@@ -43,8 +42,7 @@ ${command}
     "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",
     "if (-not $__gptWebCodexSuccess) { exit 1 }",
   ].join("; ");
-  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(script, "utf16le").toString("base64")];
+  return ["-NoLogo", "-NoProfile", "-Command", script];
 }
 
 const MAX_DIRECT_IMAGE_BYTES = 20_000_000;
@@ -1066,8 +1064,10 @@ export class DirectToolService {
     const job = this.requireTerminal(jobId, webSessionId);
     if (job.status !== "running" || !job.child) throw new Error(`Terminal job is not running: ${jobId}`);
     if (job.child.stdin.destroyed || job.child.stdin.writableEnded) throw new Error(`Terminal stdin is closed: ${jobId}`);
-    if (input) job.child.stdin.write(input, "utf8");
-    if (close) job.child.stdin.end();
+    // End with the final input chunk in one stream operation. On Windows,
+    // separate write() + end() can race the redirected pipe's final flush.
+    if (close) job.child.stdin.end(input, "utf8");
+    else if (input) job.child.stdin.write(input, "utf8");
     return this.publicTerminal(job);
   }
 

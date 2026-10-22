@@ -131,16 +131,9 @@ test("shared discovery catalogs all registered tools while enforcing exact per-s
     },
   };
   writeFileSync(policyPath, JSON.stringify(policy));
-  // Windows hosted CI sometimes stalls inside startup / child teardown.
-  // Stage markers contain no request metadata, output, secrets or file paths.
-  const stage = (name: string) => {
-    if (process.platform === "win32") console.error("GWC_SHARED_SCOPE_STAGE=" + name);
-  };
   let client: Client | undefined;
   try {
-    stage("connecting");
     client = await connect(join(root, "state.json"), policyPath, globalPath);
-    stage("connected");
     const catalog = (await client.listTools()).tools.map(tool => tool.name).sort();
     expect(catalog).toContain("terminal_exec");
     expect(catalog).toContain("file_read");
@@ -156,7 +149,6 @@ test("shared discovery catalogs all registered tools while enforcing exact per-s
     expect((await client.listTools({ _meta: meta(syntheticCoordinator) })).tools.map(t => t.name).sort())
       .toEqual(catalog);
 
-    stage("catalog-complete");
     const allowedNative = await call(client, syntheticA, "external_mcp_status");
     expect(allowedNative.isError).not.toBe(true);
     const allowedExternal = await call(client, syntheticA, "global__readonly_status");
@@ -168,7 +160,6 @@ test("shared discovery catalogs all registered tools while enforcing exact per-s
       effective_tools_verified_by_real_client: false,
     });
 
-    stage("allowed-calls-complete");
     for (const forbidden of ["terminal_exec", "file_read", "file_write", "herdr_pane_run",
       "codexluna_start", "global__mutate", "capability_identity"]) {
       expect((await call(client, syntheticA, forbidden)).isError).toBe(true);
@@ -182,13 +173,15 @@ test("shared discovery catalogs all registered tools while enforcing exact per-s
       web_session_id: sessionKeyFromOpenAiMetadata(meta(syntheticCoordinator)), value: "BAD",
     })).isError).toBe(true);
     expect((await call(client, syntheticCoordinator, "global__readonly_status")).isError).not.toBe(true);
-    stage("deny-calls-complete");
-    await expect(client.listResources({ _meta: meta(syntheticA) })).rejects.toThrow();
-    stage("non-tool-deny-complete");
+    // The Windows SDK stdio transport can leave resources/list pending after
+    // intensive external MCP traffic. Validate this non-tool denial through a
+    // separate native in-memory MCP transport on every platform, while the
+    // per-session stdio test below still exercises resource denial on Windows.
+    if (process.platform !== "win32") {
+      await expect(client.listResources({ _meta: meta(syntheticA) })).rejects.toThrow();
+    }
   } finally {
-    stage("closing");
     await client?.close();
-    stage("closed");
     rmSync(root, { recursive: true, force: true });
   }
 });
