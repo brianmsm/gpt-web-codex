@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const SELF = fileURLToPath(import.meta.url);
 const CASES = [
@@ -14,6 +15,9 @@ const CASES = [
   "powershell-command", "powershell-noninteractive",
   "powershell-encoded", "pwsh-short", "gwc-wrapper-short",
   "gwc-wrapper-interactive", "gwc-wrapper-temp-cwd",
+  "gwc-wrapper-sdk-env", "gwc-wrapper-sdk-env-temp-cwd",
+  "gwc-wrapper-sdk-env-plus-psmodulepath",
+  "gwc-wrapper-sdk-env-plus-programdata",
 ];
 const script = [
   "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
@@ -38,7 +42,8 @@ async function childArgs(key) {
         "$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput()); " +
         "$line = $reader.ReadLine(); Write-Output ('GWC_PROBE_INPUT:' + $line)"
       : "Write-Output 'GWC_PROBE_READY'";
-    const cwd = key === "gwc-wrapper-temp-cwd"
+    const cwd = (key === "gwc-wrapper-temp-cwd" ||
+      key === "gwc-wrapper-sdk-env-temp-cwd")
       ? mkdtempSync(join(tmpdir(), "gwc-node-terminal-mcp-")) : undefined;
     return ["powershell.exe", buildWindowsPowerShellArgs(userScript),
       interactive ? "owner\n" : "", cwd];
@@ -72,7 +77,7 @@ async function childArgs(key) {
   throw Error("Unknown static case");
 }
 
-async function observe(name, command, args, input, timeoutMs = 6500, cwd) {
+async function observe(name, command, args, input, timeoutMs = 6500, cwd, env) {
   let child;
   const started = Date.now();
   let stdout = "";
@@ -81,7 +86,7 @@ async function observe(name, command, args, input, timeoutMs = 6500, cwd) {
   let errorCode = "";
   try {
     child = spawn(command, args, {
-      windowsHide: true, stdio: ["pipe", "pipe", "pipe"], cwd,
+      windowsHide: true, stdio: ["pipe", "pipe", "pipe"], cwd, env,
     });
   } catch (error) {
     return { name, elapsed_ms: Date.now() - started,
@@ -134,7 +139,19 @@ if (process.platform !== "win32") {
   const bunExe = process.argv[2];
   if (!bunExe) throw Error("Need the Bun executable path");
   for (const key of CASES) {
-    const r = await observe(key, bunExe, [SELF, "inner", key], "", 8500);
+    let environment;
+    if (key.startsWith("gwc-wrapper-sdk-env")) {
+      environment = getDefaultEnvironment();
+      if (key.endsWith("plus-psmodulepath") && process.env.PSModulePath) {
+        environment.PSModulePath = process.env.PSModulePath;
+      }
+      if (key.endsWith("plus-programdata")) {
+        for (const name of ["ProgramData", "ComSpec", "ALLUSERSPROFILE"]) {
+          if (process.env[name]) environment[name] = process.env[name];
+        }
+      }
+    }
+    const r = await observe(key, bunExe, [SELF, "inner", key], "", 8500, undefined, environment);
     // The parent sees a successful Bun child only if the inner test completed;
     // keep the child's bounded diagnostic output without exposing commands.
     console.log("GWC_NESTED_PARENT=" + JSON.stringify(r));
