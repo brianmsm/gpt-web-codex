@@ -208,6 +208,40 @@ test("shared catalog mode rejects private external MCP configs, unknown modes an
 });
 
 test("real MCP stdio: per-session catalog and dispatch deny cross-session, native and global tools", async () => {
+  if (process.platform === "win32") {
+    // The MCP SDK's stdio client explicitly targets Node.js. On Windows
+    // Bun 1.3.14 has been observed to lose repeated error responses when
+    // acting as the client, even when an identical Node client succeeds
+    // against the same Bun-based GWC server. Exercise ALL authorization
+    // and cross-session assertions using the supported SDK client runtime;
+    // never skip this security test or accept request timeout as denial.
+    const child = Bun.spawn({
+      cmd: [
+        "node",
+        join(import.meta.dir, "fixtures", "windows-stdio-node-client.mjs"),
+        process.execPath,
+        cli,
+        fixture,
+      ],
+      cwd: join(import.meta.dir, ".."),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    if (exit !== 0) {
+      // The helper uses synthetic policy data and suppresses request bodies.
+      console.error("GWC_WINDOWS_NODE_POLICY_FAILURE=" + stderr.slice(-450));
+    }
+    expect(exit).toBe(0);
+    expect(stdout).toContain("GWC_NODE_WINDOWS_STDIO_POLICY_FULL_PARITY_PASS");
+    return;
+  }
+
   const root = mkdtempSync(join(tmpdir(), "gwc-session-policy-"));
   const profileA = config(root, "A");
   const profileB = config(root, "B");
