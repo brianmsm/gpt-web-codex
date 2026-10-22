@@ -19,15 +19,38 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import sharp from "sharp";
 import type { LunaSandbox } from "./types";
 import { terminateOwnedProcessTree } from "./process-tree";
 
 /**
- * Preserve user scriptblock syntax, including trailing # comments, when
- * invoking Windows PowerShell 5.1. Stdin is retained by terminal_start.
+ * The MCP SDK intentionally gives its stdio child a restricted inherited
+ * environment. In particular PSModulePath is not on its default allowlist.
+ * Windows PowerShell 5.1 can hang before running a script on hosted/headless
+ * Windows when this path is missing. Recreate only its standard module search
+ * locations for the PowerShell child; do not inherit the caller's full env.
  */
+export function windowsPowerShellSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  if (platform !== "win32" || env.PSModulePath?.trim()) return env;
+  const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
+  const systemDrive = env.SystemDrive || env.SYSTEMDRIVE || "C:";
+  const programFiles = env.ProgramFiles || env.PROGRAMFILES ||
+    win32.join(systemDrive + "\\", "Program Files");
+  const userProfile = env.USERPROFILE ||
+    (env.HOMEDRIVE && env.HOMEPATH ? env.HOMEDRIVE + env.HOMEPATH : undefined);
+  const searchPaths = [
+    ...(userProfile ? [win32.join(userProfile, "Documents", "WindowsPowerShell", "Modules")] : []),
+    win32.join(programFiles, "WindowsPowerShell", "Modules"),
+    win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
+  ];
+  return { ...env, PSModulePath: searchPaths.join(";") };
+}
+
+/** Keep a trailing '#' comment from swallowing the PowerShell script block. */
 export function buildWindowsPowerShellArgs(command: string): string[] {
   const script = [
     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
@@ -1014,7 +1037,12 @@ export class DirectToolService {
     const args = process.platform === "win32"
       ? buildWindowsPowerShellArgs(command)
       : ["-lc", command];
-    const child = spawn(shell, args, { cwd: resolvedCwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(shell, args, {
+      cwd: resolvedCwd,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      ...(process.platform === "win32" ? { env: windowsPowerShellSpawnEnv(process.env) } : {}),
+    });
     trace("spawn_returned");
     child.once("spawn", () => trace("child_spawn_event"));
     child.once("exit", () => trace("child_exit_event"));
