@@ -1002,17 +1002,32 @@ export class DirectToolService {
     if (mode === "read-only") throw new Error("Terminal execution is disabled in read-only mode");
     const resolvedCwd = resolveScopedPath(cwd, workspace, mode);
     const id = randomUUID();
+    // Temporary Windows-only, opt-in synthetic CI diagnostics. Log only
+    // fixed event names, never command strings, environment or session IDs.
+    const trace = (event: string) => {
+      if (process.platform === "win32" && process.env.GWC_TERMINAL_TRACE === "1") {
+        process.stderr.write("GWC_TERMINAL_TRACE=" + event + "\n");
+      }
+    };
+    trace("start_invoked");
     const shell = process.platform === "win32" ? "powershell.exe" : "/bin/sh";
     const args = process.platform === "win32"
       ? buildWindowsPowerShellArgs(command)
       : ["-lc", command];
     const child = spawn(shell, args, { cwd: resolvedCwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    trace("spawn_returned");
+    child.once("spawn", () => trace("child_spawn_event"));
+    child.once("exit", () => trace("child_exit_event"));
+    child.stdin.once("finish", () => trace("stdin_finish_event"));
+    child.stdin.once("error", () => trace("stdin_error_event"));
     const job: TerminalJob = {
       id, webSessionId, command, cwd: resolvedCwd, status: "running", pid: child.pid,
       output: "", stdout: "", stderr: "", outputTruncated: false,
       startedAt: new Date().toISOString(), child,
     };
+    const firstBytes = { stdout: false, stderr: false };
     const collect = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      if (!firstBytes[stream]) { firstBytes[stream] = true; trace("first_" + stream + "_event"); }
       const text = chunk.toString("utf8");
       const combined = `${job.output}${text}`;
       const streamed = `${job[stream]}${text}`;
@@ -1023,11 +1038,13 @@ export class DirectToolService {
     child.stdout.on("data", chunk => collect("stdout", chunk));
     child.stderr.on("data", chunk => collect("stderr", chunk));
     child.once("error", error => {
+      trace("child_error_event");
       job.output = `${job.output}\n${error.message}`.trim();
       job.status = "failed";
       job.finishedAt = new Date().toISOString();
     });
     child.once("close", code => {
+      trace("child_close_event");
       if (job.status === "running") job.status = code === 0 ? "completed" : "failed";
       job.exitCode = code;
       job.finishedAt = new Date().toISOString();
@@ -1068,6 +1085,9 @@ export class DirectToolService {
     // separate write() + end() can race the redirected pipe's final flush.
     if (close) job.child.stdin.end(input, "utf8");
     else if (input) job.child.stdin.write(input, "utf8");
+    if (process.platform === "win32" && process.env.GWC_TERMINAL_TRACE === "1") {
+      process.stderr.write("GWC_TERMINAL_TRACE=write_stdin_called" + "\n");
+    }
     return this.publicTerminal(job);
   }
 

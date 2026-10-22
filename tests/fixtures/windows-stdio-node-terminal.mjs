@@ -28,12 +28,27 @@ async function main() {
     args: [serverCli, "mcp", "--state-path", join(root, "state.json")],
     env: {
       ...getDefaultEnvironment(),
+      GWC_TERMINAL_TRACE: "1",
       CODEX_CHATGPT_WEB_EXTERNAL_MCP_CONFIG: join(root, "no-external-mcp.json"),
     },
     stderr: "pipe",
   });
   let serverStderrBytes = 0;
-  transport.stderr?.on("data", data => { serverStderrBytes += data.byteLength; });
+  let stderrBuffer = "";
+  let printedTraceCount = 0;
+  transport.stderr?.on("data", data => {
+    serverStderrBytes += data.byteLength;
+    stderrBuffer += data.toString("utf8");
+    const parts = stderrBuffer.split(/[\r\n]+/);
+    stderrBuffer = parts.pop() || "";
+    for (const line of parts) {
+      // Only the statically prefixed event code is forwarded. No process
+      // output, shell command, session metadata, or environment is logged.
+      if (line.startsWith("GWC_TERMINAL_TRACE=") && printedTraceCount++ < 40) {
+        console.error("GWC_NESTED_GUEST_EVENT=" + line.slice(19, 95));
+      }
+    }
+  });
   const pidState = pid => {
     if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
     try { process.kill(pid, 0); return "present"; } catch { return "absent-or-denied"; }
