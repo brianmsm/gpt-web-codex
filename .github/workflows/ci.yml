@@ -66,6 +66,12 @@ jobs:
           bun-version: ${{ matrix.bun }}
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile || bun install --frozen-lockfile
+      - name: Probe nested Bun-to-Windows PowerShell process startup
+        shell: pwsh
+        run: |
+          $BunExe = (Get-Command bun -ErrorAction Stop).Source
+          node tests/fixtures/windows-nested-process-probe.mjs $BunExe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test direct Node client with Bun GWC server (no Bun test worker)
         shell: pwsh
         run: |
