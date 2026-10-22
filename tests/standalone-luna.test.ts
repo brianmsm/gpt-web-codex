@@ -827,13 +827,25 @@ test("direct terminal jobs are isolated by authoritative web session ownership",
       _meta: { "openai/session": sessionA },
     });
     expect(ownerWrite.isError).not.toBe(true);
+    // Windows PowerShell under a nested MCP stdio client must be allowed
+    // time to process redirected stdin. Hundreds of 10ms status RPCs can
+    // saturate the same Bun event loop that drains the child process pipes.
+    // Poll at a modest cadence while preserving exact job/session identity.
     let final = ownerStatus;
-    for (let i = 0; i < 450; i += 1) {
+    const deadline = Date.now() + 18_000;
+    let statusPolls = 0;
+    for (;;) {
       final = await client.callTool({
         name: "terminal_status", arguments: { job_id: startedContent.job_id }, _meta: { "openai/session": sessionA },
       });
-      if ((final.structuredContent as { status?: string }).status !== "running") break;
-      await Bun.sleep(10);
+      statusPolls += 1;
+      if ((final.structuredContent as { status?: string }).status !== "running" || Date.now() >= deadline) break;
+      await Bun.sleep(125);
+    }
+    if (process.platform === "win32" && (final.structuredContent as { status?: string }).status === "running") {
+      const state = final.structuredContent as { stdout?: string; stderr?: string };
+      console.error("GWC_WINDOWS_TERMINAL_OWNER_WAIT_EXPIRED polls=" + statusPolls +
+        " stdout_bytes=" + (state.stdout?.length ?? 0) + " stderr_bytes=" + (state.stderr?.length ?? 0));
     }
     expect(final.isError).not.toBe(true);
     expect(final.structuredContent).toMatchObject({ status: "completed" });
