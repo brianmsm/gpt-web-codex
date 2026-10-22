@@ -32,7 +32,12 @@ async function main() {
     },
     stderr: "pipe",
   });
-  transport.stderr?.on("data", () => undefined);
+  let serverStderrBytes = 0;
+  transport.stderr?.on("data", data => { serverStderrBytes += data.byteLength; });
+  const pidState = pid => {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+    try { process.kill(pid, 0); return "present"; } catch { return "absent-or-denied"; }
+  };
   const client = new Client({ name: "gwc-node-terminal-" + mode, version: "1.0.0" });
   const owner = "terminal-owner-a";
   const foreign = "terminal-owner-b";
@@ -45,7 +50,7 @@ async function main() {
     if (mode === "ownership") {
       const started = await invoke(owner, "terminal_start", {
         command: process.platform === "win32"
-          ? '$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput()); $line = $reader.ReadLine(); Write-Output "INPUT:$line"'
+          ? 'Write-Output "GWC_TERMINAL_READY"; $reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput()); $line = $reader.ReadLine(); Write-Output "INPUT:$line"'
           : "read line; printf 'INPUT:%s\\n' \"$line\"",
         cwd: ".", workspace_path: root, permission_mode: "workspace-write",
       });
@@ -82,6 +87,14 @@ async function main() {
         final = status.structuredContent;
         polls += 1;
       }
+      if (final.status !== "completed") {
+        console.error("GWC_NODE_TERMINAL_DIAG mode=ownership" +
+          " pid_state=" + pidState(job.pid) +
+          " stdout_bytes=" + (final.stdout?.length ?? 0) +
+          " stderr_bytes=" + (final.stderr?.length ?? 0) +
+          " ready_seen=" + Boolean(final.stdout?.includes("GWC_TERMINAL_READY")) +
+          " server_stderr_bytes=" + serverStderrBytes);
+      }
       assert.equal(final.status, "completed", "owner terminal must complete; polls=" + polls);
       assert.equal(final.exit_code, 0);
       assert.ok(final.stdout.includes("INPUT:owner"));
@@ -115,6 +128,13 @@ async function main() {
         assert.notEqual(next.isError, true);
         state = next.structuredContent;
         polls += 1;
+      }
+      if (state.status !== "completed") {
+        console.error("GWC_NODE_TERMINAL_DIAG mode=exec" +
+          " pid_state=" + pidState(state.pid) +
+          " stdout_bytes=" + (state.stdout?.length ?? 0) +
+          " stderr_bytes=" + (state.stderr?.length ?? 0) +
+          " server_stderr_bytes=" + serverStderrBytes);
       }
       assert.equal(state.status, "completed", "one-shot terminal must finish; polls=" + polls);
       assert.equal(state.exit_code, 0);
