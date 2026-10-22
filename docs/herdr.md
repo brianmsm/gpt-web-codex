@@ -2,7 +2,7 @@
 
 GPT Web Codex can use Herdr as an external owner of persistent, user-visible PTYs. This bridge is intentionally separate from direct terminal jobs and Luna jobs.
 
-Validated implementation target: **Herdr 0.8.2, Socket API protocol 20**.
+Validated implementation targets: **Herdr 0.8.2 / Socket API protocol 20** and **Herdr 0.9.1 / Socket API protocol 22**. Other protocols (including 21) remain blocked pending validation.
 
 ## Runtime model
 
@@ -17,7 +17,7 @@ GPT Web Codex standalone runtime
     └── herdr_*       explicit external Herdr control
               │
               ├── herdr session list --json   session/socket discovery only
-              └── Unix Socket API protocol 20
+              └── Unix Socket API protocol 20 or 22
                          │
                          ▼
                       Herdr
@@ -50,11 +50,15 @@ GWC discovers named sessions with the machine-readable external command:
 herdr session list --json
 ```
 
-After an explicit session is selected, all workspace/tab/pane operations use Herdr's Unix Socket API directly. Herdr 0.8.2 uses newline-delimited JSON requests and responses over the session socket. Before every operational request, GWC sends `ping` and requires protocol 20; a future incompatible protocol is refused before GWC sends the requested mutation/read call.
+After an explicit session is selected, all workspace/tab/pane operations use Herdr's Unix Socket API directly. The validated 0.8.2 and 0.9.1 releases use newline-delimited JSON requests and responses over the session socket. Before every operational request, GWC sends `ping` and requires protocol **20 or 22**; an unvalidated protocol is refused before GWC sends the requested mutation/read call. Protocol 22 introduces optional `source_workspace_id` and `trust_repository` fields; GWC does not opt into either implicitly.
 
 GWC does **not** set or require `HERDR_ENV=1` and does not fabricate `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID`, or `HERDR_SOCKET_PATH`. Those variables belong to processes that were actually launched in Herdr. The bridge is an external client instead.
 
 Targets are explicit. Responses preserve the real identities returned by Herdr, including the relevant `session`, `workspace_id`, `tab_id`, `pane_id`, `terminal_id`, worktree path, and branch when Herdr supplies them. Later calls reuse those IDs rather than UI focus or "last created" state.
+
+## Protocol 22 compatibility evidence
+
+The bundled schemas of Herdr 0.8.2 (protocol 20) and 0.9.1 (protocol 22) were compared before adding protocol 22 to the allowlist. Existing GWC request methods remain present; `workspace.create` and `worktree.create` only add optional parameters (`source_workspace_id` and `trust_repository`, respectively). GWC does not set these new parameters implicitly. Protocol 22 is covered by mock operational tests and by a read-only `ping` and `session.snapshot` check against the installed Herdr 0.9.1 daemon. **No live workspace/pane mutations were exercised on the existing user's sessions**; a disposable-session operational smoke is a separate deployment gate. Unknown protocol versions still fail closed.
 
 ## Access boundary
 
@@ -179,7 +183,7 @@ Do not replace a working installed launcher merely to test source changes. Valid
 
 ## Known limitations
 
-- The bridge is validated against Herdr 0.8.2 / protocol 20. Every operational call rechecks compatibility and refuses a different protocol before sending the requested operation.
+- The bridge is validated against Herdr 0.8.2 / protocol 20 and 0.9.1 / protocol 22. Each operational call rechecks compatibility and refuses protocols outside this explicit allowlist before sending the requested operation. Schema validation is not a substitute for protected-daemon integration testing; do not restart existing Herdr sessions merely to test the bridge.
 - Session discovery depends on the installed Herdr CLI's `session list --json`; runtime control after discovery goes directly to the socket.
 - `herdr_workspace_open` canonicalizes existing paths and has robust checkout identity for Git/worktree workspaces because Herdr exposes `worktree.checkout_path`. For a non-Git workspace without worktree metadata, matching falls back to exact current pane cwd; if every pane has changed directory, opening by the original cwd may create a new workspace rather than guessing. For that reason the tool is not advertised as strictly idempotent.
 - Plain shell panes can legitimately report Herdr `agent_status="unknown"`; process information and pane existence remain separate signals.

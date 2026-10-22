@@ -273,7 +273,10 @@ export class ExternalMcpBridge {
       title: "Inspect external MCP bridge status",
       description:
         "Read the sanitized startup and lifecycle status of explicitly configured external MCP servers. "
-        + "This never returns external environment values, credentials, tokens, headers, or full sensitive configuration.",
+        + "For per-conversation native/external tool restrictions, see GWC Session Capability Profiles: "
+        + "docs/session-capabilities.md and docs/session-capabilities-operations.md in the source checkout. "
+        + "This tool does not modify permissions or return external environment values, credentials, "
+        + "tokens, headers, or full sensitive configuration.",
       inputSchema: z.object({}).strict(),
       outputSchema: z.object({
         config_loaded: z.boolean(),
@@ -335,6 +338,39 @@ export class ExternalMcpBridge {
         });
       }
     }
+  }
+
+  /**
+   * A dedicated bridge is keyed to one claimed conversation identity. No tools are
+   * registered into the global GWC catalog by this method.
+   */
+  publicTools(): ExternalMcpPublicTool[] {
+    return this.runtimes.flatMap(runtime => runtime.lifecycle === "connected" ? [...runtime.exposedTools] : []);
+  }
+
+  async callPublicTool(publicName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    for (const runtime of this.runtimes) {
+      if (runtime.lifecycle !== "connected" || !runtime.client) continue;
+      const tool = runtime.exposedTools.find(candidate => candidate.publicName === publicName);
+      if (!tool) continue;
+      try {
+        const response = await runtime.client.callTool(
+          { name: tool.originalName, arguments: args },
+          undefined,
+          { timeout: runtime.config.callTimeoutMs, maxTotalTimeout: runtime.config.callTimeoutMs },
+        );
+        if ("toolResult" in response) {
+          return toolError(runtime.config.alias, tool.originalName, "task-augmented results are not supported", runtime);
+        }
+        return safeExternalResult(response, runtime.config.alias, tool.originalName);
+      } catch (error) {
+        return toolError(runtime.config.alias, tool.originalName, error, runtime);
+      }
+    }
+    return {
+      content: [{ type: "text", text: "Capability policy denied tool invocation" }],
+      isError: true,
+    };
   }
 
   async shutdown(): Promise<void> {

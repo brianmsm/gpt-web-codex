@@ -1,132 +1,156 @@
 # GPT Web Codex
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+**ChatGPT-to-local-workspace bridge, shell-first.**
 
-[![CI](https://github.com/m4j2rpf766-crypto/gpt-web-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/m4j2rpf766-crypto/gpt-web-codex/actions/workflows/ci.yml)
+An independent, community-maintained fork · **v2.3.0** · [MIT license](LICENSE)
 
-GPT Web Codex is a pure MCP launcher. A normal ChatGPT Web conversation is the planner; Luna executes and verifies local work through `codex exec --json` without changing Codex configuration or routing.
+[![CI](https://github.com/brianmsm/gpt-web-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/brianmsm/gpt-web-codex/actions/workflows/ci.yml)
+[English](README.md) · [简体中文 (legacy translation)](README.zh-CN.md)
 
-> **Platform status:** Windows and Ubuntu 26.04 x86_64 have completed real-world manual testing. Linux verification covers the AppImage, standalone MCP, terminal and directory tools, Luna execution and session resume, and an actual ChatGPT Web tool call. macOS is covered by automated CI but has not yet been tested manually.
+GPT Web Codex connects an ordinary ChatGPT conversation to tools running on **your own computer** through an OpenAI Secure MCP Tunnel. It prioritizes direct local tools and **persistent, observable shell sessions in [Herdr](docs/herdr.md)**. Codex Luna remains available as a separate, explicitly opted-in worker, not the default execution engine.
 
-## What it does
+This is a substantially evolved fork of [m4j2rpf766-crypto/gpt-web-codex](https://github.com/m4j2rpf766-crypto/gpt-web-codex), itself based on [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web). Thanks to the original maintainers and contributors. This project is **not affiliated with or endorsed by OpenAI**.
 
-- Uses ChatGPT in the user's normal browser; the launcher never embeds or automates ChatGPT.
-- Binds each stable ChatGPT conversation URL to one persistent Luna session.
-- Exposes asynchronous `codexluna_*` tools, direct file/terminal tools, an optional explicit Herdr 0.8.2 bridge, and explicitly configured external MCP tools over MCP.
-- Serializes Luna work inside one web session while allowing different web sessions to run independently.
-- Supports `read-only`, `workspace-write`, and `danger-full-access` execution modes.
-- Keeps long-running jobs alive when the ChatGPT reply finishes; jobs can be polled or cancelled explicitly.
-- Returns verified user-relevant image artifacts from completed Luna jobs as native MCP image content for inspection, then directs ChatGPT to create one deduplicated visible card through `file_image_preview` even when the user did not explicitly ask to preview the graph.
-- Restores inline image previews after a ChatGPT page refresh from a bounded private local cache without copying Base64 into model-visible structured results.
-- Safely imports files uploaded to the current ChatGPT conversation into a user-disclosed local workspace for direct tools or Luna.
+**Public history provenance:** the fork's v2.3.0 commit sequence was reconstructed from a larger local development history to exclude installation-specific operator diagnostics. It preserves meaningful code milestones and the original author identity/dates for reused work, but is **not** a verbatim or one-to-one copy of every development commit; reconstructed committer dates differ. Private operator material is not part of the public release history.
 
-## What it does not do
+> **Security warning:** This is a powerful local execution bridge, **not a hardened command sandbox**. A model using permitted shell tools can execute destructive commands, modify files outside the intended project, access secrets visible to the OS user, or send data over the network. There is **no general destructive-command blocklist or mandatory command-by-command human approval gate** for persistent shells. Do not expose it to untrusted users, prompts, or repositories; read [Security](#security-read-this-first) before connecting it.
 
-GPT Web Codex does **not** edit `~/.codex/config.toml`, install a model provider, replace the model catalog, proxy the Responses API, or take over Codex routes. You do not select a ChatGPT Web model inside Codex. ChatGPT Web plans; Luna executes locally.
+## Why this fork?
 
-## Runtime flow
+The priority is **local tools first, persistent shells when needed, agent delegation by choice**:
+
+| Capability | What you get |
+| --- | --- |
+| **Direct local operations** | `file_*` tools, foreground/background `terminal_*` commands, bounded output, explicit workspace scope. |
+| **Herdr persistent shell** | Real, user-visible PTYs, workspaces, tabs and panes. Processes can outlive a ChatGPT response or GWC runtime restart because Herdr owns them. |
+| **External MCP servers** | An allowlisted MCP client bridge over stdio or Streamable HTTP; remote tools appear as `alias__tool`. |
+| **Browser tools (optional)** | Use Chrome DevTools MCP with an isolated Chromium profile. A Linux `systemd --user` integration can wake it on the first authorized browser-tool call. |
+| **Codex Luna (optional)** | `codexluna_*` jobs with durable conversation binding and explicit opt-in; no silent model/provider rerouting. |
+| **Session capability profiles (experimental)** | Per-conversation *tool-name* rules with known identity and isolation limitations. Not a multi-tenant security boundary. |
+
+### How it works
 
 ```text
-normal ChatGPT conversation
-        │ MCP tool calls
-        ▼
-OpenAI Tunnel → standalone local MCP runtime
-        │
-        ├─ codexluna_init/start/status/cancel/session
-        ├─ file_import_attachment / file_read / preview / list / search / write
-        ├─ file_create_directory / file_delete_directory
-        ├─ terminal_exec / start / status / write_stdin / cancel
-        ├─ herdr_status / workspace / worktree / tab / pane tools
-        └─ external_mcp_status / <alias>__<remote-tool>
-                 │                 │                    │
-                 ▼                 ▼                    ▼
-          codex exec --json   Herdr Socket API    external MCP servers
-              (Luna)            → real PTYs       (stdio / Streamable HTTP)
+ChatGPT conversation
+      │  approved MCP tool call
+      ▼
+OpenAI Secure MCP Tunnel
+      │
+      ▼
+GWC standalone MCP runtime
+      ├─ file_* / terminal_*        direct local work
+      ├─ herdr_*                   persistent, visible PTYs
+      ├─ <alias>__<tool>           external MCP servers
+      │     └─ optional Chrome DevTools MCP → dedicated Chromium
+      └─ codexluna_*              optional Codex delegation
 ```
 
-## Image previews and page refreshes
+**Persistent does not mean automatic replay.** GWC distinguishes new work from previously running/uncertain work. Herdr shells persist in Herdr; ordinary direct-terminal and Luna job lifecycles have different boundaries. See [Architecture](docs/architecture.md) and [Recovery semantics](docs/diagnostics/WAVE4_RECOVERY_WITHOUT_BLIND_REPLAY.md).
 
-- Use `file_read` as the preferred path when ChatGPT needs to inspect a local PNG/JPEG/GIF/WebP as native MCP image content. Do not substitute terminal renderers such as `chafa`, `viu`, or `img2txt` unless the user explicitly asked to view the image inside their terminal.
-- Use `file_image_preview` when the image should appear as a visible card in the conversation, including an explicit user preview request or a `codexluna_status` automatic recommendation. For model-only inspection, prefer `file_read`.
-- For HTML/PDF layout inspection, render only the relevant view or page to PNG/JPEG/WebP and inspect that rendered image with `file_read`; additionally call `file_image_preview` only when the rendered view should be shown inline to the user.
-- Luna keeps every verified image path in `image_artifacts`, but automatic presentation uses only images cited in Luna's final answer; an explicit user image request may fall back to the first verified observed image if the final message omitted its path. Purely intermediate images from non-image requests are not auto-presented.
-- When a completed `codexluna_status` returns `image_preview_recommended: true`, ChatGPT calls `file_image_preview` once for `image_preview_path`, passing `web_session_id` and `expected_image_content_key=image_preview_content_key`. The status tool itself never mounts UI. A successful preview is recorded in bounded session-scoped runtime state; later polls report `image_preview_already_presented: true`, stop recommending the same content, and do not resend its native image. Duplicate automatic claims are rejected, while an explicit repeat can reuse the existing preview ID.
-- Each successfully rendered card persists only its opaque preview ID and small metadata through that card's `window.openai.widgetState`; there is no conversation-global `localStorage`/`sessionStorage` preview ledger. Image bytes stay in the bounded private local preview cache.
-- When ChatGPT recreates the card after a page refresh or the conversation is reopened, the component calls the private `file_image_preview_restore` tool with that ID. It never rereads an arbitrary source path.
-- Cards created before the refresh-persistence format was introduced cannot be repaired retroactively. Call `file_image_preview` once more to create a restorable card.
-- Deleting the local preview cache prevents restoration even when the card's widget state is still available; restoration also requires ChatGPT to rehydrate that card's own widget state.
+## Quick start
 
-## Execution preference
+**Requirements:** a trusted Windows or Linux computer (the source has been manually exercised on Ubuntu and Omarchy/Arch), a ChatGPT account or workspace **eligible to connect custom MCP servers**, an OpenAI **Secure MCP Tunnel** and a Tunnel Runtime Key with **Tunnels: Read + Use**, and **Bun 1.3.14** for building from source. Herdr and Codex CLI are optional, according to the tools you want. macOS has CI coverage but is not a manually validated deployment target.
 
-- Prefer direct GWC tools for file operations, ordinary shell commands, and configured external MCP tools.
-- Prefer Herdr for interactive or persistent shell work that should remain visible and reacquirable.
-- Treat Codex Luna as explicit opt-in delegation: do not start it proactively. Use it only when the user asks for Luna/Codex, or after direct GWC tools and Herdr are insufficient and the user explicitly approves delegation.
-- Complexity, long duration, browser work, or a missing direct tool are not by themselves permission to fall back to Luna.
-
-## Importing ChatGPT attachments
-
-- For a ChatGPT-managed image, PDF, DOCX, ZIP, source file, CSV, or other downloadable file, whether uploaded by the user or generated by the assistant/a tool, ChatGPT can call `file_import_attachment` to transfer the binary directly into the local workspace through `openai/fileParams` instead of Base64/chunked text.
-- The tool accepts only the platform attachment object supplied through `openai/fileParams`; it is not a general URL downloader.
-- Calls must disclose `workspace_path`, `permission_mode`, and a destination path. Imports are disabled in `read-only`, and existing files are not overwritten by default.
-- Downloads default to a 20 MB limit and can be raised to at most 100 MB. Results contain the local path, byte count, MIME inspection, and SHA-256—not the temporary download URL—and imported files are never executed automatically.
-- After import, use `file_read`, `file_image_preview`, or pass the returned local path to `codexluna_start`.
-- `file_create_directory` creates empty directories (and parent directories by default). `file_delete_directory` deletes only empty directories unless `recursive: true` is explicitly supplied; it always refuses the disclosed workspace root and link/junction targets.
-- `file_list` returns each entry's type, optional file size, and `modified_at` as an ISO 8601 timestamp.
-- `terminal_exec` runs ordinary PowerShell/sh commands and waits for bounded stdout, stderr, status, and exit code. Long-running or interactive work uses `terminal_start`, `terminal_status`, `terminal_write_stdin`, and `terminal_cancel` without rerunning the command.
-- Use `herdr_*` instead when a persistent/interactively controlled process should live in a real Herdr PTY that the user can observe in the Herdr application. The bridge uses explicit Herdr session/workspace/tab/pane IDs, requires an explicit `workspace_path`/`permission_mode` scope for operational calls, validates protocol 20 before acting, and never fabricates `HERDR_ENV`. See [Herdr bridge](docs/herdr.md).
-
-## External MCP bridge
-
-GWC can initialize explicitly configured MCP servers over stdio or Streamable HTTP before it publishes its own tool catalog. Allowed remote tools appear directly as namespaced tools such as `research__search`; arbitrary remote `_meta` is contained, stdio environment inheritance is explicit, and no external server is auto-discovered. See [External MCP bridge](docs/external-mcp.md) and [external-mcp.example.json](external-mcp.example.json).
-
-## Linux deployment
-
-See [Linux deployment and troubleshooting](docs/linux.md) for the complete installation, known-issue, and diagnostic procedure. The easy-to-miss points are:
-
-- Source builds require Bun 1.3.14 with `bun` on PATH; npm 11 may block Bun's install script by default.
-- Running an AppImage directly may require Ubuntu's `libfuse2t64`; the project installer uses extract-and-run mode and does not require a FUSE mount.
-- If CLI setup creates the configuration while the launcher is already open, restart the launcher so it reloads the configuration and owns the Tunnel.
-- For non-interactive Runtime Key setup, use `--runtime-key-file /dev/stdin`; never put the key in command-line arguments.
-- OpenAI Platform and ChatGPT browser sessions are independent. Prove the final connection with a real ChatGPT Web tool call, not only the local `doctor` result.
-
-## Development
-
-Requirements: Windows or Linux x86_64, Codex CLI, a ChatGPT account with custom connectors, and an OpenAI Tunnel for MCP. The packaged launcher includes Bun; building from source requires Bun 1.3.14. macOS has not yet been manually tested.
+**1. Download and install source dependencies.**
 
 ```bash
-git clone https://github.com/m4j2rpf766-crypto/gpt-web-codex.git
+git clone https://github.com/brianmsm/gpt-web-codex.git
 cd gpt-web-codex
 bun install --frozen-lockfile
+```
+
+> The source release requires Bun 1.3.14. Check with `bun --version`. Packaged desktop launchers bundle their runtime, but a published binary release and this source checkout are different things.
+
+**2. Create your tunnel and restricted runtime key.**
+
+In the OpenAI Platform, create a [Secure MCP Tunnel](https://platform.openai.com/settings/organization/tunnels) and a [Runtime Key](https://platform.openai.com/settings/organization/api-keys) with only the required **Tunnels: Read + Use** permissions. Store the key in a private file (`chmod 600` on Linux); do not paste it into ChatGPT or pass it as a command-line argument.
+
+**3. Configure GWC (new installations only).**
+
+```bash
+bun run src/cli.ts setup \
+  --full --mcp-only \
+  --tunnel-id 'tunnel_YOUR_ID' \
+  --runtime-key-file '/path/to/private/runtime-key' \
+  --acknowledge-unofficial
+
 bun run launcher:dev
 ```
 
-From the launcher:
+The launcher owns the normal local runtime lifecycle. If you already have a **protected or customized running GWC tunnel**, **do not rerun setup or click “Reconnect saved tunnel” blindly**: setup can replace a pinned wrapper or change runtime ownership. See [Linux deployment](docs/linux.md) and make a verified backup first.
 
-1. Enter the Tunnel ID and a Tunnels Read + Use API key.
-2. Create a ChatGPT connector named `WebGPT Luna Standalone`, using Tunnel transport and Authentication `None`.
-3. Verify the runtime, then use the connector from a normal ChatGPT conversation in Chrome, Edge, Firefox, or another browser.
+**4. Add the connector in ChatGPT.**
 
-The connector name remains stable because ChatGPT caches tool contracts. Legacy local data directory names may be retained internally during migration so existing tunnel and Luna session state are not lost.
+In supported ChatGPT accounts, go to **Plugins → Add custom MCP server** (the location/name may vary), select **Tunnel**, supply your Tunnel ID, review the tool permissions and create the connection. Existing installations may use the historic name *WebGPT Luna Standalone*; you do not need to rename it.
 
-## Verification
+Open a ChatGPT conversation, select or mention the connector and try a **harmless read-only task** such as listing a known disposable project directory. A passing local `doctor` check alone does not establish that ChatGPT can call the MCP tools.
+
+Official instructions: [Connecting custom MCP servers in ChatGPT](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt). Availability, allowed actions and approvals depend on your account/workspace.
+
+## Using a persistent Herdr shell
+
+Herdr is an **optional separate application**. GWC bridges to its session/socket and addresses explicit workspace, tab and pane IDs rather than imitating keystrokes in an arbitrary window.
+
+1. Install and start Herdr, then confirm `herdr session list --json` works. The tested integration targets **Herdr 0.8.2 / Socket API protocol 20** and **Herdr 0.9.1 / Socket API protocol 22**; other versions remain blocked until validated.
+2. In a ChatGPT conversation, ask GWC to open an **authorized local workspace in Herdr** and run a non-destructive command in its pane.
+3. Inspect or attach to the same session in Herdr. The terminal process remains visible and can be reacquired after the ChatGPT reply finishes or GWC reconnects.
+
+The `workspace_path` and `permission_mode` arguments scope which Herdr workspace/pane can be selected; **they do not sandbox commands inside that shell**. See [Herdr guide](docs/herdr.md).
+
+For one-shot operations, prefer direct `file_*` or `terminal_exec` instead of opening a persistent shell.
+
+## External MCP and browser configuration
+
+GWC can act as an MCP *client*. Create `~/.codex-chatgpt-web/external-mcp.json` (optional) using [external-mcp.example.json](external-mcp.example.json):
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "my-tools": {
+      "transport": "stdio",
+      "command": "/absolute/path/to/trusted-mcp-server",
+      "args": [],
+      "inherit_env": ["PATH"],
+      "required": false,
+      "tools": { "allow": ["status", "search"] }
+    }
+  }
+}
+```
+
+GWC does **not** discover random local MCP servers automatically. Configure only trusted servers, pass only necessary environment variables, and restart the **GWC MCP runtime safely** to update its startup catalog. For HTTP servers, see [External MCP bridge](docs/external-mcp.md).
+
+An **optional Omarchy/Hyprland Chrome DevTools recipe** runs Chromium with a separate profile and loopback CDP, supervised by `systemd --user`. The integration can wake the browser just before an authorized Chrome MCP tool call. It is not enabled by default for other machines. See [Chrome auto-wake setup and boundaries](docs/chrome-browser.md). Do not expose a CDP port publicly; any local process with access to it can control that browser.
+
+## Security: read this first
+
+**Do not treat “workspace-write”, a tool annotation, or a conversation-level instruction as a secure OS sandbox.**
+
+- **Arbitrary commands:** `terminal_exec`, `terminal_start`, `herdr_pane_run` and `herdr_pane_send` can execute commands with the permissions of the local user or Herdr process. **There is no general protection against `rm -rf`, overwriting a repository, credential access or network exfiltration.** No built-in mandatory human confirmation exists for each shell command.
+- **Persistent execution:** A Herdr pane can continue after the model stops replying. Losing a tool result does not prove that the command failed; **never blindly replay** side-effecting operations.
+- **Prompt injection:** Files, websites, terminal output and external MCP results can contain hostile instructions. Review instructions before allowing tools to mutate your system.
+- **Access control:** Session Capability Profiles limit listed tools by conversation when configured, but do not authenticate arbitrary clients or constrain an already-authorized shell's filesystem/network reach. `danger-full-access` deliberately disables path scoping.
+- **Browser/credentials:** A Chrome DevTools connection can expose logged-in sessions. Keep tunnel keys and profiles private; use a dedicated browser profile, a low-privilege OS account or stronger isolation for risky workloads.
+
+Use this project only on **systems and data you control**. Prefer read-only tasks, backups, narrow tool allowlists and an OS-level sandbox/container. See [Security policy](SECURITY.md), [Security model](docs/security-model.md) and [Session Capability Profiles](docs/session-capabilities.md).
+
+## OpenAI compatibility and terms
+
+OpenAI [documents custom MCP server connections and Secure MCP Tunnel](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt). GWC uses that integration to accept **tool calls initiated inside ChatGPT**. It does **not** automate ChatGPT's conversation web UI to extract model responses, scrape chat histories, imitate user input or bypass rate limits. The separate Chromium integration operates on **user-authorized third-party websites**, not as a ChatGPT scraping engine.
+
+OpenAI's [app guidance](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) and [Terms of Use](https://openai.com/policies/terms-of-use/) (or the [Europe terms](https://openai.com/policies/eu-terms-of-use/) if applicable) still apply: custom MCP support is **not** a blanket authorization for every command, write action, automation or account/plan. Automated extraction and circumvention of platform safeguards are restricted. Users are responsible for authorization, tool safety and applicable terms. **We do not claim a formal OpenAI security review, endorsement or legal/compliance certification.**
+
+## Development and release
 
 ```bash
-bun x tsc --noEmit
+bun run check-version
+bun run typecheck
 bun test tests
 bun run launcher:typecheck
 bun run launcher:test
 ```
 
-## Security boundary
+Version **v2.3.0** follows standard semantic versioning. See [CHANGELOG.md](CHANGELOG.md) for the fork's changes and validation scope. Before pushing any ref, follow the [privacy-curated release and tag preflight](docs/release-publication.md). The release workflow first stages binary assets as a private **GitHub Release draft**. The maintainer must review its CI results, signatures and checksums before manually publishing. A source version/tag is not evidence that an installer has already been published.
 
-The launcher keeps tunnel credentials in private local storage and redacts them from logs. It does not keep ChatGPT cookies, browser profiles, or conversation history. Attachment imports accept only validated ChatGPT/OpenAI file origins, pin the actual connection to a validated public address, revalidate redirects, create temporary files beside the destination, and clean up failures. To restore image cards after a page refresh, compressed preview copies are stored under the private standalone runtime directory for up to 90 days, capped at 128 previews; the cache does not retain the source path. `codexluna_init` returns the resolved workspace, permission mode, durable session ID, and a visible session-memory boundary before local execution. That boundary is prompt-level guidance; it cannot change the ChatGPT account's product-level Memory setting.
-
-This is an independent, unofficial local MCP connector. It does not automate ChatGPT's UI and must not expose a tunnel or workspace you do not control.
-
-## License
-
-MIT. See [LICENSE](LICENSE) and [LICENSES](LICENSES).
-
-## Acknowledgements
-
-GPT Web Codex is based on and evolved from the original [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) project. Sincere thanks to miuuyy and every original contributor for making this work possible.
+Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md). The MIT license and required third-party notices are in [LICENSE](LICENSE) and [LICENSES](LICENSES).

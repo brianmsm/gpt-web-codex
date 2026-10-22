@@ -1,8 +1,8 @@
 {
   "name": "gpt-web-codex-launcher",
-  "version": "2.2.11",
+  "version": "2.3.0",
   "private": true,
-  "description": "Desktop control center for ChatGPT Web planning and standalone Luna execution",
+  "description": "Desktop launcher for a shell-first ChatGPT MCP bridge and optional Luna tasks",
   "desktopName": "gpt-web-codex.desktop",
   "author": "GPT Web Codex contributors",
   "type": "module",

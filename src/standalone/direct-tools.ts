@@ -1,10 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  type Dirent,
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   linkSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -15,16 +18,65 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import sharp from "sharp";
 import type { LunaSandbox } from "./types";
 import { terminateOwnedProcessTree } from "./process-tree";
+
+/**
+ * The MCP SDK intentionally gives its stdio child a restricted inherited
+ * environment. In particular PSModulePath is not on its default allowlist.
+ * Seed Windows PowerShell's own modules first so built-in commands do not
+ * depend on discovery through unrelated installed modules. Never add the
+ * PowerShell 7 module roots: their Core assemblies are incompatible with 5.1.
+ * Explicit caller paths are preserved; no broader environment is inherited.
+ */
+export function windowsPowerShellSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  if (platform !== "win32" || env.PSModulePath?.trim()) return env;
+  const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
+  const systemDrive = env.SystemDrive || env.SYSTEMDRIVE || "C:";
+  const programFiles = env.ProgramFiles || env.PROGRAMFILES ||
+    win32.join(systemDrive + "\\", "Program Files");
+  const userProfile = env.USERPROFILE ||
+    (env.HOMEDRIVE && env.HOMEPATH ? env.HOMEDRIVE + env.HOMEPATH : undefined);
+  const searchPaths = [
+    win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
+    ...(userProfile ? [win32.join(userProfile, "Documents", "WindowsPowerShell", "Modules")] : []),
+    win32.join(programFiles, "WindowsPowerShell", "Modules"),
+  ];
+  return { ...env, PSModulePath: searchPaths.join(";") };
+}
+
+/** Keep a trailing '#' comment from swallowing the PowerShell script block. */
+export function buildWindowsPowerShellArgs(command: string): string[] {
+  const script = [
+    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
+    "$global:LASTEXITCODE = $null",
+    `& {
+${command}
+}`,
+    "$__gptWebCodexSuccess = $?",
+    "$__gptWebCodexExitCode = $LASTEXITCODE",
+    "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",
+    "if (-not $__gptWebCodexSuccess) { exit 1 }",
+  ].join("; ");
+  return ["-NoLogo", "-NoProfile", "-Command", script];
+}
 
 const MAX_DIRECT_IMAGE_BYTES = 20_000_000;
 const MAX_SOURCE_IMAGE_BYTES = 50_000_000;
 const MODEL_IMAGE_MAX_DIMENSION = 1_600;
 const MAX_TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT_MUTATION_TRANSACTION_BYTES = 64 * 1024 * 1024;
+const BROWSER_UPLOAD_STAGING_PREFIX = "gpt-web-codex-browser-upload-";
+const BROWSER_UPLOAD_STAGING_TTL_MS = 24 * 60 * 60 * 1_000;
+const MAX_BROWSER_UPLOAD_STAGING_BYTES = 500_000_000;
 
 export interface DirectTextFileRead {
   path: string;
@@ -88,6 +140,47 @@ export function resolveScopedPath(path: string, workspace: string, mode: LunaSan
 
 function assertWritableMode(mode: LunaSandbox, operation: string): void {
   if (mode === "read-only") throw new Error(`${operation} is disabled in read-only mode`);
+}
+
+function cleanupStaleBrowserUploadStaging(): void {
+  const root = tmpdir();
+  const cutoff = Date.now() - BROWSER_UPLOAD_STAGING_TTL_MS;
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(BROWSER_UPLOAD_STAGING_PREFIX)) continue;
+    const candidate = resolve(root, entry.name);
+    try {
+      if (lstatSync(candidate).mtimeMs < cutoff) rmSync(candidate, { recursive: true, force: true });
+    } catch {
+      // Cleanup is opportunistic and must never block a new staging operation.
+    }
+  }
+}
+
+function resolveBrowserUploadSource(path: string, workspace: string, mode: LunaSandbox): {
+  path: string;
+  bytes: number;
+} {
+  const scoped = resolveScopedPath(path, workspace, mode);
+  const entry = lstatSync(scoped);
+  if (entry.isSymbolicLink()) {
+    throw new Error(`Refusing to stage a browser upload through a symbolic link: ${scoped}`);
+  }
+  const canonical = realpathSync(scoped);
+  if (mode !== "danger-full-access") {
+    const workspaceRoot = realpathSync(resolve(workspace));
+    if (!within(canonical, workspaceRoot)) {
+      throw new Error(`Browser upload source resolves outside the disclosed workspace through a link: ${scoped}`);
+    }
+  }
+  const metadata = statSync(canonical);
+  if (!metadata.isFile()) throw new Error(`Browser upload source is not a regular file: ${canonical}`);
+  return { path: canonical, bytes: metadata.size };
 }
 
 function pathEntryExists(path: string): boolean {
@@ -280,6 +373,13 @@ function stagedMutationPath(path: string, label: string): string {
   return resolve(dirname(path), `.${basename(path)}.gwc-${label}-${randomUUID()}.tmp`);
 }
 
+// Per-service filesystem syscall seam. Production always uses the real Node
+// filesystem; tests can inject deterministic EEXIST/rename failures on macOS
+// and Windows without monkeypatching ESM named imports or global process state.
+export type DirectTextMutationIO = Pick<typeof import("node:fs"),
+  "writeFileSync" | "renameSync" | "linkSync">;
+const defaultTextMutationIO: DirectTextMutationIO = { writeFileSync, renameSync, linkSync };
+
 const activeTextMutationPaths = new Set<string>();
 
 function withTextMutationLocks<T>(paths: string[], operation: string, run: () => T): T {
@@ -296,15 +396,15 @@ function withTextMutationLocks<T>(paths: string[], operation: string, run: () =>
   }
 }
 
-function commitTextMutations(plans: PreparedTextMutation[], operation: string): void {
+function commitTextMutations(plans: PreparedTextMutation[], operation: string, io: DirectTextMutationIO): void {
   const changed = plans.filter(plan => !plan.original.equals(plan.updated));
   if (changed.length === 0) return;
   withTextMutationLocks(changed.map(plan => plan.path), operation, () => {
-    commitLockedTextMutations(changed, operation);
+    commitLockedTextMutations(changed, operation, io);
   });
 }
 
-function commitLockedTextMutations(changed: PreparedTextMutation[], operation: string): void {
+function commitLockedTextMutations(changed: PreparedTextMutation[], operation: string, io: DirectTextMutationIO): void {
   for (const plan of changed) {
     const current = readMutationBytes(plan.path);
     if (!current.equals(plan.original)) {
@@ -329,8 +429,8 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
 
   try {
     for (const plan of staged) {
-      writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
-      writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
+      io.writeFileSync(plan.updatedTemp, plan.updated, { flag: "wx", mode: plan.mode });
+      io.writeFileSync(plan.rollbackTemp, plan.original, { flag: "wx", mode: plan.mode });
       chmodSync(plan.updatedTemp, plan.mode);
       chmodSync(plan.rollbackTemp, plan.mode);
     }
@@ -352,7 +452,7 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
       if (!current.equals(plan.original)) {
         throw new Error(`${operation} aborted because the file changed before commit: ${plan.path}`);
       }
-      renameSync(plan.updatedTemp, plan.path);
+      io.renameSync(plan.updatedTemp, plan.path);
       touched.push(plan);
     }
   } catch (error) {
@@ -372,7 +472,7 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
           );
           continue;
         }
-        renameSync(plan.rollbackTemp, plan.path);
+        io.renameSync(plan.rollbackTemp, plan.path);
       } catch (rollbackError) {
         rollbackErrors.push(
           `${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}${preserveRollback(plan)}`,
@@ -390,19 +490,19 @@ function commitLockedTextMutations(changed: PreparedTextMutation[], operation: s
   cleanup();
 }
 
-function commitNewTextMutation(path: string, updated: Buffer, operation: string): void {
+function commitNewTextMutation(path: string, updated: Buffer, operation: string, io: DirectTextMutationIO): void {
   withTextMutationLocks([path], operation, () => {
     if (pathEntryExists(path)) {
       throw new Error(`${operation} aborted because the target appeared before creation: ${path}`);
     }
     const updatedTemp = stagedMutationPath(path, "updated");
     try {
-      writeFileSync(updatedTemp, updated, { flag: "wx" });
+      io.writeFileSync(updatedTemp, updated, { flag: "wx" });
       if (pathEntryExists(path)) {
         throw new Error(`${operation} aborted because the target appeared during staging: ${path}`);
       }
       try {
-        linkSync(updatedTemp, path);
+        io.linkSync(updatedTemp, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
           throw new Error(`${operation} aborted because the target appeared before publication: ${path}`, { cause: error });
@@ -603,6 +703,8 @@ function applyUnifiedHunks(path: string, text: string, hunks: UnifiedDiffHunk[])
 export class DirectToolService {
   private readonly terminals = new Map<string, TerminalJob>();
 
+  constructor(private readonly textMutationIO: DirectTextMutationIO = defaultTextMutationIO) {}
+
   shutdown(): void {
     for (const job of this.terminals.values()) {
       if (job.status !== "running" || !job.child) continue;
@@ -682,6 +784,42 @@ export class DirectToolService {
     throw new Error(`Image could not be reduced below the ${limit}-byte MCP transfer limit: ${target} (smallest ${best?.bytes.length ?? source.length} bytes)`);
   }
 
+  stageBrowserUpload(
+    path: string,
+    workspace: string,
+    mode: LunaSandbox,
+    maxBytes = 100_000_000,
+  ): { source_path: string; staged_path: string; bytes: number; staging_ttl_ms: number } {
+    assertWritableMode(mode, "Browser upload staging");
+    const source = resolveBrowserUploadSource(path, workspace, mode);
+    const limit = Math.min(Math.max(1, maxBytes), MAX_BROWSER_UPLOAD_STAGING_BYTES);
+    if (source.bytes > limit) {
+      throw new Error(`Browser upload source exceeds the ${limit}-byte staging limit: ${source.path}`);
+    }
+
+    cleanupStaleBrowserUploadStaging();
+    const stagingDir = mkdtempSync(resolve(tmpdir(), BROWSER_UPLOAD_STAGING_PREFIX));
+    const stagedPath = resolve(stagingDir, basename(source.path));
+    try {
+      if (process.platform !== "win32") chmodSync(stagingDir, 0o700);
+      copyFileSync(source.path, stagedPath);
+      if (process.platform !== "win32") chmodSync(stagedPath, 0o600);
+      const staged = statSync(stagedPath);
+      if (!staged.isFile() || staged.size !== source.bytes) {
+        throw new Error(`Browser upload staging verification failed for ${source.path}`);
+      }
+      return {
+        source_path: source.path,
+        staged_path: stagedPath,
+        bytes: staged.size,
+        staging_ttl_ms: BROWSER_UPLOAD_STAGING_TTL_MS,
+      };
+    } catch (error) {
+      rmSync(stagingDir, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
   list(path: string, workspace: string, mode: LunaSandbox): {
     path: string;
     entries: Array<{ name: string; kind: string; size?: number; modified_at: string }>;
@@ -743,7 +881,7 @@ export class DirectToolService {
       reserveMutationTransactionBytes(0, source.path, source.bytes.length, updatedBytes, "File write");
       assertValidMutationText(content, source.path);
       const updated = Buffer.from(content, "utf8");
-      commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write");
+      commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File write", this.textMutationIO);
       return { path: requestedTarget, bytes: updated.length };
     }
 
@@ -751,7 +889,7 @@ export class DirectToolService {
     reserveMutationTransactionBytes(0, target, 0, updatedBytes, "File write");
     assertValidMutationText(content, target);
     const updated = Buffer.from(content, "utf8");
-    commitNewTextMutation(target, updated, "File write");
+    commitNewTextMutation(target, updated, "File write", this.textMutationIO);
     return { path: requestedTarget, bytes: updated.length };
   }
 
@@ -802,7 +940,7 @@ export class DirectToolService {
     assertValidMutationText(updatedText, source.path);
     const updated = Buffer.from(updatedText, "utf8");
     reserveMutationTransactionBytes(0, source.path, source.bytes.length, updated.length, "File edit");
-    commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit");
+    commitTextMutations([{ path: source.path, original: source.bytes, updated }], "File edit", this.textMutationIO);
     return {
       path: source.path,
       replacements: occurrences,
@@ -842,7 +980,7 @@ export class DirectToolService {
       });
     }
 
-    commitTextMutations(plans, "File patch");
+    commitTextMutations(plans, "File patch", this.textMutationIO);
     return {
       files_applied: files.length,
       hunks_applied: files.reduce((sum, file) => sum + file.hunks, 0),
@@ -888,28 +1026,37 @@ export class DirectToolService {
     if (mode === "read-only") throw new Error("Terminal execution is disabled in read-only mode");
     const resolvedCwd = resolveScopedPath(cwd, workspace, mode);
     const id = randomUUID();
+    // Temporary Windows-only, opt-in synthetic CI diagnostics. Log only
+    // fixed event names, never command strings, environment or session IDs.
+    const trace = (event: string) => {
+      if (process.platform === "win32" && process.env.GWC_TERMINAL_TRACE === "1") {
+        process.stderr.write("GWC_TERMINAL_TRACE=" + event + "\n");
+      }
+    };
+    trace("start_invoked");
     const shell = process.platform === "win32" ? "powershell.exe" : "/bin/sh";
-    const powershellCommand = [
-      "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
-      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-      "$OutputEncoding = [Console]::OutputEncoding",
-      "$global:LASTEXITCODE = $null",
-      `& { ${command} }`,
-      "$__gptWebCodexSuccess = $?",
-      "$__gptWebCodexExitCode = $LASTEXITCODE",
-      "if ($null -ne $__gptWebCodexExitCode) { exit $__gptWebCodexExitCode }",
-      "if (-not $__gptWebCodexSuccess) { exit 1 }",
-    ].join("; ");
     const args = process.platform === "win32"
-      ? ["-NoLogo", "-NoProfile", "-Command", powershellCommand]
+      ? buildWindowsPowerShellArgs(command)
       : ["-lc", command];
-    const child = spawn(shell, args, { cwd: resolvedCwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(shell, args, {
+      cwd: resolvedCwd,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      ...(process.platform === "win32" ? { env: windowsPowerShellSpawnEnv(process.env) } : {}),
+    });
+    trace("spawn_returned");
+    child.once("spawn", () => trace("child_spawn_event"));
+    child.once("exit", () => trace("child_exit_event"));
+    child.stdin.once("finish", () => trace("stdin_finish_event"));
+    child.stdin.once("error", () => trace("stdin_error_event"));
     const job: TerminalJob = {
       id, webSessionId, command, cwd: resolvedCwd, status: "running", pid: child.pid,
       output: "", stdout: "", stderr: "", outputTruncated: false,
       startedAt: new Date().toISOString(), child,
     };
+    const firstBytes = { stdout: false, stderr: false };
     const collect = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      if (!firstBytes[stream]) { firstBytes[stream] = true; trace("first_" + stream + "_event"); }
       const text = chunk.toString("utf8");
       const combined = `${job.output}${text}`;
       const streamed = `${job[stream]}${text}`;
@@ -920,11 +1067,13 @@ export class DirectToolService {
     child.stdout.on("data", chunk => collect("stdout", chunk));
     child.stderr.on("data", chunk => collect("stderr", chunk));
     child.once("error", error => {
+      trace("child_error_event");
       job.output = `${job.output}\n${error.message}`.trim();
       job.status = "failed";
       job.finishedAt = new Date().toISOString();
     });
     child.once("close", code => {
+      trace("child_close_event");
       if (job.status === "running") job.status = code === 0 ? "completed" : "failed";
       job.exitCode = code;
       job.finishedAt = new Date().toISOString();
@@ -961,8 +1110,13 @@ export class DirectToolService {
     const job = this.requireTerminal(jobId, webSessionId);
     if (job.status !== "running" || !job.child) throw new Error(`Terminal job is not running: ${jobId}`);
     if (job.child.stdin.destroyed || job.child.stdin.writableEnded) throw new Error(`Terminal stdin is closed: ${jobId}`);
-    if (input) job.child.stdin.write(input, "utf8");
-    if (close) job.child.stdin.end();
+    // End with the final input chunk in one stream operation. On Windows,
+    // separate write() + end() can race the redirected pipe's final flush.
+    if (close) job.child.stdin.end(input, "utf8");
+    else if (input) job.child.stdin.write(input, "utf8");
+    if (process.platform === "win32" && process.env.GWC_TERMINAL_TRACE === "1") {
+      process.stderr.write("GWC_TERMINAL_TRACE=write_stdin_called" + "\n");
+    }
     return this.publicTerminal(job);
   }
 

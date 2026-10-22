@@ -92,7 +92,21 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.3\.14/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /GPT Web Codex\.app/);
-  assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
+  // Publication now stages a draft until the maintainer reviews the assets.
+  assert.match(release, /permissions:\s*contents: read/);
+  assert.match(release, /publish:[\s\S]*?permissions:\s*contents: write/);
+  const stageDraft = fs.readFileSync(path.join(repositoryRoot, "scripts", "stage-release-draft.sh"), "utf8");
+  const stageClient = fs.readFileSync(path.join(repositoryRoot, "scripts", "stage_release_draft.py"), "utf8");
+  assert.match(release, /bash scripts\/stage-release-draft\.sh release-assets/);
+  assert.match(release, /RELEASE_APPROVED_COMMIT_SHA/);
+  assert.match(stageDraft, /exec python3 -B/);
+  assert.match(stageDraft, /stage_release_draft\.py/);
+  assert.match(stageClient, /Existing release or title collision; refusing create/);
+  assert.match(stageClient, /validate_tag\(rest, stem, tag, approved, preflight=True\)/);
+  assert.match(stageClient, /CREATE_ID_CONFIRMED/);
+  assert.match(stageClient, /DRAFT_STAGED_ASSET_INVENTORY_VERIFIED/);
+  assert.match(stageClient, /DRAFT_STAGED_BINARY_DIGEST_VERIFIED/);
+  assert.doesNotMatch(stageDraft, /gh release create|gh release view|gh release upload|--draft=false/);
 });
 
 test("release publishes the repository demo as a checksummed versioned asset", () => {

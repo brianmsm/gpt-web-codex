@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   statSync,
@@ -14,16 +15,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DirectToolService } from "../src/standalone/direct-tools";
+import { DirectToolService, type DirectTextMutationIO } from "../src/standalone/direct-tools";
 
 const TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
 
-function withWorkspace(run: (root: string, workspace: string, tools: DirectToolService) => void): void {
-  const root = mkdtempSync(join(tmpdir(), "gwc-direct-write-"));
+function withWorkspace(run: (root: string, workspace: string, tools: DirectToolService, io: DirectTextMutationIO) => void): void {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gwc-direct-write-")));
   const workspace = join(root, "workspace");
   mkdirSync(workspace);
   try {
-    run(root, workspace, new DirectToolService());
+    const io: DirectTextMutationIO = {
+      writeFileSync: fs.writeFileSync, renameSync: fs.renameSync, linkSync: fs.linkSync,
+    };
+    run(root, workspace, new DirectToolService(io), io);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -38,7 +42,7 @@ function unified(...lines: string[]): string {
 }
 
 test("file_write safely replaces an existing UTF-8 file and preserves its mode", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "existing.txt");
     writeFileSync(path, "before\n", "utf8");
     if (process.platform !== "win32") chmodSync(path, 0o764);
@@ -54,7 +58,7 @@ test("file_write safely replaces an existing UTF-8 file and preserves its mode",
 });
 
 test("file_write follows an internal file symlink but rejects an escaping file symlink", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const inside = join(workspace, "inside.txt");
     const insideLink = join(workspace, "inside-link.txt");
     writeFileSync(inside, "inside\n", "utf8");
@@ -75,7 +79,7 @@ test("file_write follows an internal file symlink but rejects an escaping file s
 });
 
 test("file_write rejects non-UTF-8 existing files instead of bypassing the text mutation boundary", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "binary.bin");
     writeFileSync(path, Buffer.from([0xff, 0x00, 0x61]));
 
@@ -85,7 +89,7 @@ test("file_write rejects non-UTF-8 existing files instead of bypassing the text 
 });
 
 test("file_write rejects NUL output for both replace and create before staging", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const existing = join(workspace, "existing.txt");
     writeFileSync(existing, "before\n", "utf8");
 
@@ -99,7 +103,7 @@ test("file_write rejects NUL output for both replace and create before staging",
 });
 
 test("file_write creates new Unicode files in canonical in-workspace parents", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     mkdirSync(join(workspace, "nested", "deep"), { recursive: true });
     const content = "café 🦊\n";
     const target = join(workspace, "nested", "deep", "new.txt");
@@ -113,7 +117,7 @@ test("file_write creates new Unicode files in canonical in-workspace parents", (
 });
 
 test("file_write allows an internal parent symlink but rejects a parent symlink escape", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const insideDir = join(workspace, "real-dir");
     mkdirSync(insideDir);
     symlinkSync(insideDir, join(workspace, "inside-dir"), process.platform === "win32" ? "junction" : "dir");
@@ -129,7 +133,7 @@ test("file_write allows an internal parent symlink but rejects a parent symlink 
 });
 
 test("file_write rejects workspace traversal and read-only writes for both create and replace", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const existing = join(workspace, "existing.txt");
     writeFileSync(existing, "before\n", "utf8");
 
@@ -145,7 +149,7 @@ test("file_write rejects workspace traversal and read-only writes for both creat
 });
 
 test("file_write refuses missing parents and dangling symlink targets instead of weakening create semantics", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     expect(() => tools.write("missing/new.txt", "new\n", workspace, "workspace-write")).toThrow("Parent directory does not exist");
     expect(existsSync(join(workspace, "missing"))).toBe(false);
 
@@ -157,7 +161,7 @@ test("file_write refuses missing parents and dangling symlink targets instead of
 });
 
 test("file_write preserves danger-full-access semantics outside the workspace", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const outsideExisting = join(root, "outside-existing.txt");
     writeFileSync(outsideExisting, "before\n", "utf8");
     tools.write(outsideExisting, "after\n", workspace, "danger-full-access");
@@ -170,7 +174,7 @@ test("file_write preserves danger-full-access semantics outside the workspace", 
 });
 
 test("file_write enforces the mutation limit in UTF-8 bytes before writing or allocating an output buffer", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const existing = join(workspace, "existing.txt");
     writeFileSync(existing, "before\n", "utf8");
     const oversized = "é".repeat(Math.floor(TEXT_MUTATION_FILE_BYTES / 2) + 1);
@@ -186,11 +190,11 @@ test("file_write enforces the mutation limit in UTF-8 bytes before writing or al
 });
 
 test("file_write does not truncate an existing file when staged publication fails", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "existing.txt");
     writeFileSync(path, "before\n", "utf8");
-    const originalRename = fs.renameSync;
-    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+    const originalRename = io.renameSync;
+    const renameSpy = spyOn(io, "renameSync").mockImplementation(((oldPath, newPath) => {
       if (String(oldPath).includes(".existing.txt.gwc-updated-") && String(newPath) === path) {
         throw new Error("synthetic publish failure");
       }
@@ -209,12 +213,12 @@ test("file_write does not truncate an existing file when staged publication fail
 });
 
 test("file_write refuses a concurrent external change detected during existing-file staging", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "existing.txt");
     writeFileSync(path, "before\n", "utf8");
-    const originalWrite = fs.writeFileSync;
+    const originalWrite = io.writeFileSync;
     let injected = false;
-    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+    const writeSpy = spyOn(io, "writeFileSync").mockImplementation(((file, data, options) => {
       originalWrite(file, data, options as never);
       if (!injected && String(file).includes(".existing.txt.gwc-rollback-")) {
         injected = true;
@@ -235,11 +239,11 @@ test("file_write refuses a concurrent external change detected during existing-f
 });
 
 test("file_write create publication never overwrites a target that appears in the race window", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "race.txt");
-    const originalLink = fs.linkSync;
+    const originalLink = io.linkSync;
     let injected = false;
-    const linkSpy = spyOn(fs, "linkSync").mockImplementation(((existingPath, newPath) => {
+    const linkSpy = spyOn(io, "linkSync").mockImplementation(((existingPath, newPath) => {
       if (!injected && String(newPath) === path) {
         injected = true;
         writeFileSync(path, "racer\n", "utf8");
@@ -260,9 +264,9 @@ test("file_write create publication never overwrites a target that appears in th
 });
 
 test("file_write cleans create staging files after a publication error", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "new.txt");
-    const linkSpy = spyOn(fs, "linkSync").mockImplementation((() => {
+    const linkSpy = spyOn(io, "linkSync").mockImplementation((() => {
       throw new Error("synthetic create publish failure");
     }) as typeof fs.linkSync);
 
@@ -278,16 +282,16 @@ test("file_write cleans create staging files after a publication error", () => {
 });
 
 test("file_write, file_edit, and file_apply_patch share the canonical direct-mutation lock", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "shared.txt");
     const alias = join(workspace, "alias.txt");
     writeFileSync(path, "before\n", "utf8");
     symlinkSync(path, alias, "file");
 
-    const originalWrite = fs.writeFileSync;
+    const originalWrite = io.writeFileSync;
     let editBlockedWrite = false;
     let injected = false;
-    let writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+    let writeSpy = spyOn(io, "writeFileSync").mockImplementation(((file, data, options) => {
       if (!injected && String(file).includes(".shared.txt.gwc-updated-")) {
         injected = true;
         try {
@@ -308,7 +312,7 @@ test("file_write, file_edit, and file_apply_patch share the canonical direct-mut
 
     let patchBlockedWrite = false;
     injected = false;
-    writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+    writeSpy = spyOn(io, "writeFileSync").mockImplementation(((file, data, options) => {
       if (!injected && String(file).includes(".shared.txt.gwc-updated-")) {
         injected = true;
         try {
@@ -335,7 +339,7 @@ test("file_write, file_edit, and file_apply_patch share the canonical direct-mut
 
     let writeBlockedEdit = false;
     injected = false;
-    writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
+    writeSpy = spyOn(io, "writeFileSync").mockImplementation(((file, data, options) => {
       if (!injected && String(file).includes(".shared.txt.gwc-updated-")) {
         injected = true;
         try {

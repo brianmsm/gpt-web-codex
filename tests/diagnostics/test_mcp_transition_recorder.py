@@ -61,7 +61,7 @@ class RecorderUnitTests(unittest.TestCase):
                 "bash",
                 "-c",
                 (
-                    "/home/brian/.codex-chatgpt-web/bin/tunnel-client run "
+                    "/home/sample-user/.codex-chatgpt-web/bin/tunnel-client run "
                     "--profile codex-chatgpt-web"
                 ),
             ]

@@ -2,7 +2,9 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/m4j2rpf766-crypto/gpt-web-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/m4j2rpf766-crypto/gpt-web-codex/actions/workflows/ci.yml)
+[![CI](https://github.com/brianmsm/gpt-web-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/brianmsm/gpt-web-codex/actions/workflows/ci.yml)
+
+> **翻译状态：** 本页仍是旧版 Luna-first 项目的历史译文，尚未同步 v2.3.0 的 shell-first 架构、Herdr、MCP 配置及安全警告。请以最新的 [English README](README.md)、[Security policy](SECURITY.md) 和 [CHANGELOG](CHANGELOG.md) 为准。
 
 GPT Web Codex 是一个纯 MCP 启动器。普通 ChatGPT 网页对话负责规划，Luna 通过 `codex exec --json` 在本机执行并验证任务。
 
@@ -80,7 +82,7 @@ Linux 的完整安装、已知问题和诊断流程见 [Linux 部署与排错](d
 当前支持 Windows 和 Linux x86_64，需要 Codex CLI、支持自定义连接器的 ChatGPT 账户，以及用于 MCP 的 OpenAI Tunnel。安装包已经内置 Bun；从源码构建需要 Bun 1.3.14。macOS 尚未实机验证。
 
 ```bash
-git clone https://github.com/m4j2rpf766-crypto/gpt-web-codex.git
+git clone https://github.com/brianmsm/gpt-web-codex.git
 cd gpt-web-codex
 bun install --frozen-lockfile
 bun run launcher:dev

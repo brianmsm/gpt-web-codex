@@ -9,16 +9,19 @@ import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup";
 import { managedRuntimeKeyPath } from "./tunnel";
+import { runSessionCapabilitiesAdmin } from "./standalone/session-capabilities/admin";
 import { VERSION } from "./version";
 
 const HELP = `gpt-web-codex ${VERSION}
 
-ChatGPT Web planning with standalone Luna execution and local MCP tools.
+Shell-first ChatGPT MCP bridge with direct tools, persistent Herdr shells and optional Codex Luna.
 
 Usage:
   gpt-web-codex setup --full --mcp-only --tunnel-id ID --runtime-key-file PATH [options]
   gpt-web-codex doctor [--json]
   gpt-web-codex mcp [--state-path PATH]
+  gpt-web-codex capabilities check --config PATH [--session-key chatgpt:SHA256]
+  gpt-web-codex capabilities bind --config PATH --session-key chatgpt:SHA256 --profile NAME [--replace]
   gpt-web-codex open <tunnels|runtime-keys|connectors>
 
 Setup options:
@@ -182,6 +185,7 @@ async function main(): Promise<void> {
   else if (command === "setup") await setupCommand(args);
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "mcp") await runChatGptMcpMain(args);
+  else if (command === "capabilities") runSessionCapabilitiesAdmin(args);
   else if (command === "open") await openCommand(args);
   else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }

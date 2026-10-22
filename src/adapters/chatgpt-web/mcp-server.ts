@@ -22,6 +22,8 @@ import {
 } from "./mcp-request-trace";
 import { registerHerdrTools } from "../../standalone/herdr-tools";
 import { ExternalMcpBridge } from "../../standalone/external-mcp/bridge";
+import { sessionKeyFromOpenAiMetadata, loadSessionCapabilityConfig } from "../../standalone/session-capabilities/config";
+import { SessionCapabilityBoundary } from "../../standalone/session-capabilities/boundary";
 import {
   COMPACT_SESSION_POLICY,
   MCP_SERVER_INSTRUCTIONS,
@@ -49,6 +51,7 @@ export const GWC_NATIVE_TOOL_NAMES = new Set([
   "codexluna_session",
   "file_read",
   "file_import_attachment",
+  "file_stage_browser_upload",
   "file_image_preview",
   "file_image_preview_restore",
   "file_list",
@@ -65,6 +68,7 @@ export const GWC_NATIVE_TOOL_NAMES = new Set([
   "terminal_cancel",
   "herdr_status",
   "herdr_workspace_open",
+  "herdr_workspace_transfer",
   "herdr_worktree_create",
   "herdr_tab_create",
   "herdr_pane_split",
@@ -276,10 +280,18 @@ export async function runChatGptMcpServer(options: {
   const herdr = options.herdrClient ?? new HerdrClient();
   const imagePreviews = new ImagePreviewCache(options.statePath);
   const requestTrace = McpRequestTracer.fromEnvironment();
+  const capabilityConfig = loadSessionCapabilityConfig();
+  const policyNativeNames = capabilityConfig
+    ? new Set([...GWC_NATIVE_TOOL_NAMES, "capability_identity"])
+    : GWC_NATIVE_TOOL_NAMES;
+  const capabilityBoundary = capabilityConfig
+    ? new SessionCapabilityBoundary(capabilityConfig, policyNativeNames)
+    : undefined;
   const server = new McpServer(
     { name: "gpt-web-codex", version: VERSION },
     { instructions: MCP_SERVER_INSTRUCTIONS },
   );
+  capabilityBoundary?.install(server);
   let externalMcp: ExternalMcpBridge | undefined;
   let shutdownStarted = false;
   const shutdownServices = async (): Promise<void> => {
@@ -288,6 +300,7 @@ export async function runChatGptMcpServer(options: {
     jobs.shutdown();
     direct.shutdown();
     await externalMcp?.shutdown();
+    await capabilityBoundary?.shutdown();
   };
   const shutdown = () => {
     void shutdownServices().finally(() => {
@@ -301,6 +314,38 @@ export async function runChatGptMcpServer(options: {
     process.off("SIGTERM", shutdown);
     void shutdownServices();
   };
+
+  if (capabilityBoundary) {
+    server.registerTool("capability_identity", {
+      title: "Inspect this conversation's capability enrollment identifier",
+      description:
+        "Read-only pre-enrollment diagnostic for the current ChatGPT conversation. "
+        + "It cannot assign or change a policy. A local administrator must bind "
+        + "the returned session hash through an out-of-band protected config and restart GWC. "
+        + "Docs for generic Session Capability Profiles: docs/session-capabilities.md and "
+        + "docs/session-capabilities-operations.md (GWC source checkout). "
+        + "This identity tool does not authorize or change permissions. "
+        + "This does not authenticate arbitrary MCP clients that can forge request metadata.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: z.object({
+        session_key: z.string(),
+        policy_config_sha256: z.string(),
+        selected_profile: z.string(),
+        catalog_mode: z.enum(["per_session", "shared"]),
+        profile_version: z.number().int().nullable(),
+        configured_native_tools: z.array(z.string()).nullable(),
+        configured_external_tools: z.array(z.string()).nullable(),
+        effective_tools_verified_by_real_client: z.boolean(),
+        chatgpt_other_plugins_controlled: z.boolean(),
+        chatgpt_memory_controlled: z.boolean(),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      _meta: { securitySchemes: noAuth },
+    }, async (_input, extra) => {
+      const sessionKey = sessionKeyFromOpenAiMetadata(extra._meta);
+      return result(capabilityBoundary.inspection(sessionKey));
+    });
+  }
 
   registerHerdrTools(server, herdr, jobs.store, conversationSessionId);
 
@@ -559,7 +604,7 @@ export async function runChatGptMcpServer(options: {
 
   server.registerTool("file_import_attachment", {
     title: "Import a ChatGPT attachment",
-    description: "Save a ChatGPT-managed file into a disclosed local workspace, including user uploads and assistant/tool-generated downloadable files. The file parameter must be the platform attachment object supplied through openai/fileParams; this is not a general URL downloader. Prefer this binary transfer path over Base64 or chunked text transport. Disabled in read-only mode. Downloads are size-limited, source-checked, hashed, never executed, and do not overwrite by default. After import, use file_read/file_image_preview or give the returned local path to codexluna_start.",
+    description: "Save a ChatGPT-managed file into a disclosed local workspace, including user uploads and assistant/tool-generated downloadable files. The file parameter must be the platform attachment object supplied through openai/fileParams; this is not a general URL downloader. Prefer this binary transfer path over Base64 or chunked text transport. Disabled in read-only mode. Downloads are size-limited, source-checked, hashed, never executed, and do not overwrite by default. After import, use file_read/file_image_preview or give the returned local path to codexluna_start. For an explicitly user-authorized browser upload, import first and then call file_stage_browser_upload; do not expose the file to the page through a localhost HTTP relay.",
     inputSchema: {
       file: z.object({
         download_url: z.string().min(1),
@@ -597,6 +642,34 @@ export async function runChatGptMcpServer(options: {
     expectedSha256: input.expected_sha256,
     maxBytes: input.max_bytes,
   }) }));
+
+  server.registerTool("file_stage_browser_upload", {
+    title: "Stage a local file for browser upload",
+    description: "Create a private OS-temporary copy of an existing local file so a browser-control MCP can attach it with its native upload/file-input tool. Use only as part of an explicitly user-authorized browser file upload. The source must be a regular file inside the disclosed workspace unless danger-full-access is selected. This tool never starts an HTTP server, never makes the page fetch localhost, and therefore avoids local-network permission prompts caused by loopback relay workarounds. It does not upload anything by itself. Pass staged_path to the browser's native upload tool. Staged copies are created with restrictive permissions where supported and become eligible for opportunistic cleanup after 24 hours.",
+    inputSchema: {
+      path: z.string().min(1),
+      workspace_path: z.string().min(1),
+      permission_mode: sandbox.default("workspace-write"),
+      max_bytes: z.number().int().min(1).max(500_000_000).default(100_000_000),
+    },
+    outputSchema: {
+      source_path: z.string(),
+      staged_path: z.string(),
+      bytes: z.number().int().nonnegative(),
+      staging_ttl_ms: z.number().int().positive(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    _meta: {
+      securitySchemes: noAuth,
+      "openai/toolInvocation/invoking": "Staging browser upload",
+      "openai/toolInvocation/invoked": "Browser upload staged",
+    },
+  }, async input => result(direct.stageBrowserUpload(
+    input.path,
+    input.workspace_path,
+    input.permission_mode,
+    input.max_bytes,
+  )));
 
   server.registerTool("file_image_preview", {
     title: "Display a local image inline",
@@ -839,6 +912,11 @@ export async function runChatGptMcpServer(options: {
     });
     requestTrace.recordTerminalExec("execution_started", extra.requestId, traceIdentity, started, boundaryDispatchId);
 
+    // A one-shot terminal_exec has no stdin channel. Close its pipe promptly:
+    // Windows PowerShell can wait indefinitely for EOF when -Command receives
+    // redirected stdin even after the script finishes, yielding a false
+    // "running" result. Interactive terminal_start still retains stdin.
+    direct.writeTerminalStdin(started.id, "", true, webSessionId);
     const completed = await direct.waitTerminal(started.id, input.wait_timeout_ms, webSessionId);
     if (completed.status !== "running") {
       requestTrace.recordLifecycle({
@@ -894,7 +972,7 @@ export async function runChatGptMcpServer(options: {
 
   try {
     externalMcp = await ExternalMcpBridge.initialize({ configPath: options.externalMcpConfigPath });
-    await externalMcp.registerTools(server, GWC_NATIVE_TOOL_NAMES);
+    await externalMcp.registerTools(server, policyNativeNames);
     await server.connect(new TracingStdioServerTransport(requestTrace));
   } catch (error) {
     process.off("SIGINT", shutdown);

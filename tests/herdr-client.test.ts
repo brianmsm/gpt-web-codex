@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
@@ -10,6 +11,13 @@ import {
   type HerdrSessionInfo,
   type HerdrWireRequest,
 } from "../src/standalone/herdr-client";
+
+function socketFixturePath(root: string): string {
+  // Test the same newline-framed stream using a native Windows named pipe.
+  return process.platform === "win32"
+    ? String.raw`\\.\pipe\gwc-herdr-${randomUUID()}`
+    : join(root, "herdr.sock");
+}
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -80,14 +88,137 @@ test("status reports an unsupported protocol with the observed version and proto
     health: "failed",
     version: "0.9.0",
     protocol: 21,
-    error: "Unsupported Herdr protocol 21; expected 20",
+    error: "Unsupported Herdr protocol 21; expected 20 or 22",
   });
+});
+
+test("status recognizes Herdr 0.9.1 protocol 22 without enabling unvalidated protocols", async () => {
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => ({
+      id: request.id,
+      result: { type: "pong", version: "0.9.1", protocol: 22 },
+    }),
+  });
+  const health = await client.status("test");
+  expect(health.health).toBe("healthy");
+  expect("selected" in health ? health.selected : null).toMatchObject({
+    health: "healthy", version: "0.9.1", protocol: 22, error: null,
+  });
+});
+
+test("Herdr 0.9.1 / protocol 22 supports scoped read-only snapshot and pane reads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-herdr-protocol22-read-"));
+  roots.push(root);
+  const methods: string[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      methods.push(request.method);
+      let result: Record<string, unknown>;
+      switch (request.method) {
+        case "ping": result = { type: "pong", version: "0.9.1", protocol: 22 }; break;
+        case "session.snapshot": result = {
+          type: "session_snapshot", snapshot: {
+            version: "0.9.1", protocol: 22,
+            workspaces: [{ workspace_id: "w22", active_tab_id: "t22", worktree: { checkout_path: root } }],
+            tabs: [{ tab_id: "t22", workspace_id: "w22" }],
+            panes: [{ pane_id: "p22", tab_id: "t22", workspace_id: "w22", cwd: root }],
+          },
+        }; break;
+        case "pane.read": result = { type: "pane_read", read: { pane_id: "p22", text: "protocol22", revision: 1 } }; break;
+        default: throw new Error(`unexpected Herdr method ${request.method}`);
+      }
+      return { id: request.id, result };
+    },
+  });
+  const scope = { workspacePath: root, permissionMode: "read-only" as const };
+  const workspace = await client.openWorkspace("test", root, undefined, scope);
+  expect(workspace.created).toBe(false);
+  expect(workspace.workspace).toMatchObject({ workspace_id: "w22" });
+  const read = await client.readPane("test", { paneId: "p22", source: "recent" }, scope);
+  expect(read.read).toMatchObject({ text: "protocol22" });
+  expect(methods).toEqual(["ping", "session.snapshot", "ping", "session.snapshot", "pane.read"]);
+});
+
+test("Herdr 0.9.1 / protocol 22 allows scoped API mutations with existing optional parameter defaults", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-herdr-protocol22-write-"));
+  roots.push(root);
+  const calls: HerdrWireRequest[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      calls.push(request);
+      const data: Record<string, unknown> = request.method === "ping"
+        ? { type: "pong", version: "0.9.1", protocol: 22 }
+        : request.method === "session.snapshot"
+          ? { type: "session_snapshot", snapshot: { version: "0.9.1", protocol: 22, workspaces: [], tabs: [], panes: [] } }
+          : request.method === "workspace.create"
+            ? { type: "workspace_created", workspace: { workspace_id: "w22" }, tab: null, root_pane: null }
+            : request.method === "worktree.create"
+              ? { type: "worktree_created", workspace: { workspace_id: "wt22" }, tab: {}, root_pane: {}, worktree: { branch: "compat-test" } }
+              : request.method === "pane.send_input"
+                ? { type: "ok" }
+                : (() => { throw new Error(`unexpected Herdr method ${request.method}`); })();
+      return { id: request.id, result: data };
+    },
+  });
+  const scope = { workspacePath: root, permissionMode: "workspace-write" as const };
+  const created = await client.openWorkspace("test", root, "isolated", scope);
+  expect(created.created).toBe(true);
+  const worktree = await client.createWorktree("test", {
+    sourceCwd: root, branch: "compat-test", path: join(root, "sandbox"),
+  }, scope);
+  expect(worktree.worktree).toMatchObject({ branch: "compat-test" });
+  await client.runPane("test", "p22", "printf compat", fullAccess);
+  const methods = calls.map(request => request.method);
+  expect(methods).toEqual(["ping", "session.snapshot", "workspace.create", "ping", "worktree.create", "ping", "pane.send_input"]);
+  expect(calls.find(request => request.method === "workspace.create")?.params).not.toHaveProperty("source_workspace_id");
+  expect(calls.find(request => request.method === "worktree.create")?.params).not.toHaveProperty("trust_repository");
+  expect(calls.find(request => request.method === "pane.send_input")?.params).toMatchObject({
+    pane_id: "p22", text: "printf compat", keys: ["enter"],
+  });
+});
+
+test("Herdr 0.9.1 protocol 22 ping does not accept a mismatched unsupported snapshot protocol", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gwc-herdr-protocol22-mismatch-"));
+  roots.push(root);
+  const methods: string[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      methods.push(request.method);
+      return { id: request.id, result: request.method === "ping"
+        ? { type: "pong", version: "0.9.1", protocol: 22 }
+        : { type: "session_snapshot", snapshot: { version: "0.9.1", protocol: 21, workspaces: [], tabs: [], panes: [] } },
+      };
+    },
+  });
+  await expect(client.readPane("test", { paneId: "p22", source: "recent" }, {
+    workspacePath: root, permissionMode: "read-only",
+  })).rejects.toMatchObject({ code: "unsupported_protocol" });
+  expect(methods).toEqual(["ping", "session.snapshot"]);
+});
+
+test("unknown future Herdr protocol 23 refuses mutations without sending an operational request", async () => {
+  const methods: string[] = [];
+  const client = new HerdrClient({
+    discoverSessions: async () => [session],
+    sendRequest: async (_socket, request) => {
+      methods.push(request.method);
+      return { id: request.id, result: { type: "pong", version: "1.0.0", protocol: 23 } };
+    },
+  });
+  await expect(client.runPane("test", "p23", "echo must-not-run", fullAccess)).rejects.toMatchObject({
+    code: "unsupported_protocol",
+  });
+  expect(methods).toEqual(["ping"]);
 });
 
 test("socket transport speaks Herdr newline-delimited JSON and validates a live response", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-socket-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
+  const socketPath = socketFixturePath(root);
   const server = createServer(socket => {
     socket.setEncoding("utf8");
     let input = "";
@@ -113,8 +244,12 @@ test("socket transport speaks Herdr newline-delimited JSON and validates a live 
 test("socket transport rejects malformed Herdr responses", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-malformed-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
-  const server = createServer(socket => socket.end("not-json\n"));
+  const socketPath = socketFixturePath(root);
+  const server = createServer(socket => {
+    // Wait for a complete request before replying/closing. On Windows a
+    // named-pipe close can otherwise race the first client read.
+    socket.once("data", () => socket.end("not-json\n"));
+  });
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -130,7 +265,7 @@ test("socket transport rejects malformed Herdr responses", async () => {
 test("socket transport reports timeout as unknown and performs no cleanup", async () => {
   const root = mkdtempSync(join(tmpdir(), "gwc-herdr-timeout-"));
   roots.push(root);
-  const socketPath = join(root, "herdr.sock");
+  const socketPath = socketFixturePath(root);
   const server = createServer(() => {});
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
@@ -229,7 +364,7 @@ test("workspace open creates without focus when no workspace owns the cwd", asyn
   const opened = await client.openWorkspace("test", "/repo/new", "worker", fullAccess);
   expect(opened.created).toBe(true);
   expect(opened.workspace).toMatchObject({ workspace_id: "w7" });
-  expect(requests[1]?.params).toMatchObject({ cwd: "/repo/new", label: "worker", focus: false });
+  expect(requests[1]?.params).toMatchObject({ cwd: resolve("/repo/new"), label: "worker", focus: false });
 });
 
 test("workspace open refuses an ambiguous cwd rather than relying on focus", async () => {
@@ -250,7 +385,7 @@ test("workspace open refuses an ambiguous cwd rather than relying on focus", asy
 test("worktree creation returns the workspace tab pane and worktree identities", async () => {
   const client = fakeClient(request => {
     expect(request.method).toBe("worktree.create");
-    expect(request.params).toMatchObject({ cwd: "/repo/main", branch: "feat/a", base: "main", path: "/repo/a", focus: false });
+    expect(request.params).toMatchObject({ cwd: resolve("/repo/main"), branch: "feat/a", base: "main", path: resolve("/repo/a"), focus: false });
     return {
       type: "worktree_created",
       workspace: { workspace_id: "wA" },
@@ -269,13 +404,13 @@ test("tab and pane creation target explicit workspace and pane ids", async () =>
   const client = fakeClient(request => {
     methods.push(request.method);
     if (request.method === "tab.create") {
-      expect(request.params).toMatchObject({ workspace_id: "wA", cwd: "/repo/a", label: "tests", focus: false });
+      expect(request.params).toMatchObject({ workspace_id: "wA", cwd: resolve("/repo/a"), label: "tests", focus: false });
       return { type: "tab_created", tab: { tab_id: "wA:t2", workspace_id: "wA" }, root_pane: { pane_id: "wA:p2", terminal_id: "term2" } };
     }
-    expect(request.params).toMatchObject({ target_pane_id: "wA:p2", direction: "right", cwd: "/repo/a", focus: false });
+    expect(request.params).toMatchObject({ target_pane_id: "wA:p2", direction: "right", cwd: resolve("/repo/a"), focus: false });
     return { type: "pane_info", pane: { pane_id: "wA:p3", terminal_id: "term3", workspace_id: "wA", tab_id: "wA:t2" } };
   });
-  const tab = await client.createTab("test", { workspaceId: "wA", cwd: "/repo/a", label: "tests" }, fullAccess);
+  const tab = await client.createTab("test", { workspaceId: "wA", cwd: resolve("/repo/a"), label: "tests" }, fullAccess);
   const pane = await client.splitPane("test", { targetPaneId: "wA:p2", direction: "right", cwd: "/repo/a" }, fullAccess);
   expect(tab.root_pane).toMatchObject({ pane_id: "wA:p2" });
   expect(pane.pane).toMatchObject({ pane_id: "wA:p3" });

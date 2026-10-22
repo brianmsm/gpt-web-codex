@@ -46,11 +46,16 @@ type ToolResult = {
 };
 
 function toolResult(value: Record<string, unknown>, isError = false): ToolResult {
+  const error = isError && value.error && typeof value.error === "object" && !Array.isArray(value.error)
+    ? value.error as Record<string, unknown>
+    : undefined;
+  const errorCode = typeof error?.code === "string" ? error.code : undefined;
+  const errorMessage = typeof error?.message === "string" ? error.message : undefined;
   return {
     content: [{
       type: "text",
       text: isError
-        ? "Herdr operation failed. Read structuredContent for health and error details."
+        ? `Herdr operation failed${errorCode ? ` [${errorCode}]` : ""}${errorMessage ? `: ${errorMessage}` : "."} Read structuredContent for health and error details.`
         : "Herdr operation completed. Read structuredContent for explicit session/workspace/tab/pane identities.",
     }],
     structuredContent: value,
@@ -99,6 +104,10 @@ function ownershipError(kind: "workspace" | "pane"): HerdrClientError {
     "failed",
     "cross_session_ownership",
   );
+}
+
+function transferError(code: string, message: string): HerdrClientError {
+  return new HerdrClientError(message, "failed", code);
 }
 
 function requireWorkspaceOwner(store: LunaStateStore, webSession: string, herdrSession: string, workspaceId: string): void {
@@ -180,6 +189,99 @@ export function registerHerdrTools(
     const opened = await herdr.openWorkspace(input.session, input.cwd, input.label, scope(input));
     bindWorkspaceResult(store, webSession, input.session, opened);
     return { ...opened, web_session_id: webSession };
+  }));
+
+  server.registerTool("herdr_workspace_transfer", {
+    title: "Transfer a Herdr workspace to this conversation",
+    description: "Explicit cross-conversation handoff for one known persistent Herdr workspace. Never call proactively or merely because another Herdr operation returned cross_session_ownership. Use only when the user explicitly asks to continue a workspace from another ChatGPT conversation and supplies the exact session, workspace_id, workspace_path, and expected_previous_owner plus confirm_transfer=true. The current owner is compare-and-swapped against expected_previous_owner, the live workspace and all live panes are verified inside the disclosed workspace scope, and ownership is rebound atomically to the authoritative current openai/session. This does not spoof web_session_id, does not allow cwd-only takeover, and danger-full-access is not accepted. It cannot retract a Herdr action that was already dispatched before the transfer began.",
+    inputSchema: {
+      session: sessionName,
+      workspace_id: herdrId,
+      expected_previous_owner: webSessionId,
+      confirm_transfer: z.literal(true),
+      web_session_id: webSessionId.optional(),
+      workspace_path: localPath.describe("Exact disclosed local workspace scope for the Herdr workspace being transferred."),
+      permission_mode: z.literal("workspace-write").default("workspace-write"),
+    },
+    outputSchema: {
+      ...operationOutput,
+      session: z.string().optional(),
+      socket_path: z.string().optional(),
+      workspace_id: z.string().optional(),
+      workspace_path: z.string().optional(),
+      previous_owner: z.string().optional(),
+      new_owner: z.string().optional(),
+      pane_ids: z.array(z.string()).optional(),
+      transferred_at: z.string().optional(),
+      transferred: z.boolean().optional(),
+      already_owned: z.boolean().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    _meta: { securitySchemes: noAuth },
+  }, async (input, extra) => guarded(async () => {
+    const webSession = resolveWebSessionId(input.web_session_id, extra._meta, false);
+    const inspected = await herdr.inspectWorkspace(input.session, input.workspace_id, scope(input));
+    const paneIds = Array.isArray(inspected.panes)
+      ? [...new Set(inspected.panes.map(pane => recordId(pane, "pane_id")).filter((value): value is string => Boolean(value)))].sort()
+      : [];
+    const currentOwner = store.herdrWorkspaceOwner(input.session, input.workspace_id);
+    if (!currentOwner) {
+      throw transferError(
+        "herdr_workspace_unowned",
+        "Herdr workspace has no persisted GWC owner; use herdr_workspace_open instead of cross-session transfer",
+      );
+    }
+    if (currentOwner === webSession) {
+      return {
+        session: inspected.session,
+        socket_path: inspected.socket_path,
+        workspace_id: input.workspace_id,
+        workspace_path: input.workspace_path,
+        previous_owner: currentOwner,
+        new_owner: webSession,
+        pane_ids: paneIds,
+        transferred: false,
+        already_owned: true,
+        web_session_id: webSession,
+      };
+    }
+    if (currentOwner !== input.expected_previous_owner) {
+      throw transferError(
+        "herdr_transfer_owner_mismatch",
+        "Herdr workspace owner no longer matches expected_previous_owner; refusing stale or conflicting transfer",
+      );
+    }
+    for (const paneId of paneIds) {
+      const paneOwner = store.herdrPaneOwner(input.session, paneId);
+      if (paneOwner && paneOwner !== currentOwner && paneOwner !== webSession) {
+        throw transferError(
+          "herdr_transfer_pane_conflict",
+          `Herdr pane ${paneId} is owned by a different web session; refusing partial workspace transfer`,
+        );
+      }
+    }
+
+    const transfer = store.transferHerdrWorkspaceOwnership({
+      newOwner: webSession,
+      sessionName: input.session,
+      workspaceId: input.workspace_id,
+      workspacePath: input.workspace_path,
+      expectedPreviousOwner: input.expected_previous_owner,
+      paneIds,
+    });
+    return {
+      session: inspected.session,
+      socket_path: inspected.socket_path,
+      workspace_id: transfer.workspaceId,
+      workspace_path: transfer.workspacePath,
+      previous_owner: transfer.previousOwner,
+      new_owner: transfer.newOwner,
+      pane_ids: transfer.paneIds,
+      transferred_at: transfer.transferredAt,
+      transferred: true,
+      already_owned: false,
+      web_session_id: webSession,
+    };
   }));
 
   server.registerTool("herdr_worktree_create", {

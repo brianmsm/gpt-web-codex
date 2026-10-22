@@ -1,16 +1,19 @@
 import { expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DirectToolService } from "../src/standalone/direct-tools";
+import { DirectToolService, type DirectTextMutationIO } from "../src/standalone/direct-tools";
 
-function withWorkspace(run: (root: string, workspace: string, tools: DirectToolService) => void): void {
-  const root = mkdtempSync(join(tmpdir(), "gwc-direct-edit-"));
+function withWorkspace(run: (root: string, workspace: string, tools: DirectToolService, io: DirectTextMutationIO) => void): void {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gwc-direct-edit-")));
   const workspace = join(root, "workspace");
   mkdirSync(workspace);
   try {
-    run(root, workspace, new DirectToolService());
+    const io: DirectTextMutationIO = {
+      writeFileSync: fs.writeFileSync, renameSync: fs.renameSync, linkSync: fs.linkSync,
+    };
+    run(root, workspace, new DirectToolService(io), io);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -24,7 +27,7 @@ const TEXT_MUTATION_FILE_BYTES = 16 * 1024 * 1024;
 const TEXT_MUTATION_TRANSACTION_BYTES = 64 * 1024 * 1024;
 
 test("file_edit replaces one exact occurrence and reports the byte change", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     writeFileSync(join(workspace, "sample.txt"), "alpha beta gamma\n", "utf8");
     const result = tools.edit("sample.txt", "beta", "BETA", workspace, "workspace-write");
     expect(result).toEqual({
@@ -39,7 +42,7 @@ test("file_edit replaces one exact occurrence and reports the byte change", () =
 });
 
 test("file_edit rejects missing and ambiguous context without modifying the file", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "sample.txt");
     writeFileSync(path, "same same\n", "utf8");
     expect(() => tools.edit("sample.txt", "missing", "x", workspace, "workspace-write")).toThrow("not found");
@@ -50,7 +53,7 @@ test("file_edit rejects missing and ambiguous context without modifying the file
 });
 
 test("file_edit replaces exactly the declared number of non-overlapping matches", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "sample.txt");
     writeFileSync(path, "same same same\n", "utf8");
     expect(() => tools.edit("sample.txt", "same", "x", workspace, "workspace-write", 2)).toThrow("found 3");
@@ -62,7 +65,7 @@ test("file_edit replaces exactly the declared number of non-overlapping matches"
 });
 
 test("file_edit treats old_text equal to new_text as a validated no-op", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "same.txt");
     writeFileSync(path, "unchanged\n", "utf8");
     const result = tools.edit("same.txt", "unchanged", "unchanged", workspace, "workspace-write");
@@ -72,7 +75,7 @@ test("file_edit treats old_text equal to new_text as a validated no-op", () => {
 });
 
 test("file_edit handles Unicode and rejects an empty file when old_text is absent", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     writeFileSync(join(workspace, "unicode.txt"), "café 🦊\n", "utf8");
     const result = tools.edit("unicode.txt", "café 🦊", "mañana 🌙", workspace, "workspace-write");
     expect(result.replacements).toBe(1);
@@ -85,7 +88,7 @@ test("file_edit handles Unicode and rejects an empty file when old_text is absen
 });
 
 test("file_edit rejects read-only, traversal, symlink escape, and non-text input", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     writeFileSync(join(workspace, "inside.txt"), "inside\n", "utf8");
     expect(() => tools.edit("inside.txt", "inside", "changed", workspace, "read-only")).toThrow("read-only");
     expect(readFileSync(join(workspace, "inside.txt"), "utf8")).toBe("inside\n");
@@ -108,7 +111,7 @@ test("file_edit rejects read-only, traversal, symlink escape, and non-text input
 });
 
 test("file_edit rejects a result containing NUL before staging", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "nul-edit.txt");
     writeFileSync(path, "before value after\n", "utf8");
 
@@ -119,7 +122,7 @@ test("file_edit rejects a result containing NUL before staging", () => {
 });
 
 test("file_edit preserves danger-full-access semantics outside the workspace", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const outside = join(root, "outside.txt");
     writeFileSync(outside, "outside\n", "utf8");
     tools.edit(outside, "outside", "allowed", workspace, "danger-full-access");
@@ -128,7 +131,7 @@ test("file_edit preserves danger-full-access semantics outside the workspace", (
 });
 
 test("file_apply_patch applies one strict unified-diff hunk", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "sample.txt");
     writeFileSync(path, "alpha\nbeta\ngamma\n", "utf8");
     const result = tools.applyPatch(unified(
@@ -147,7 +150,7 @@ test("file_apply_patch applies one strict unified-diff hunk", () => {
 });
 
 test("file_apply_patch applies multiple hunks at their exact declared coordinates", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "multi.txt");
     writeFileSync(path, "one\ntwo\nthree\nfour\nfive\nsix\n", "utf8");
     const result = tools.applyPatch(unified(
@@ -168,7 +171,7 @@ test("file_apply_patch applies multiple hunks at their exact declared coordinate
 });
 
 test("file_apply_patch validates every file before a multi-file commit", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const first = join(workspace, "first.txt");
     const second = join(workspace, "second.txt");
     writeFileSync(first, "first\n", "utf8");
@@ -192,7 +195,7 @@ test("file_apply_patch validates every file before a multi-file commit", () => {
 });
 
 test("file_apply_patch leaves every file unchanged when a later file has stale context", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const first = join(workspace, "first.txt");
     const second = join(workspace, "second.txt");
     writeFileSync(first, "first\n", "utf8");
@@ -216,7 +219,7 @@ test("file_apply_patch leaves every file unchanged when a later file has stale c
 });
 
 test("file_apply_patch never relocates a hunk to matching text at another line", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "strict.txt");
     writeFileSync(path, "prefix\ntarget\n", "utf8");
     const patch = unified(
@@ -232,7 +235,7 @@ test("file_apply_patch never relocates a hunk to matching text at another line",
 });
 
 test("file_apply_patch rejects malformed patches and invalid hunk counts", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "sample.txt");
     writeFileSync(path, "one\ntwo\n", "utf8");
     expect(() => tools.applyPatch("not a unified diff", workspace, "workspace-write")).toThrow("Malformed unified diff");
@@ -247,7 +250,7 @@ test("file_apply_patch rejects malformed patches and invalid hunk counts", () =>
 });
 
 test("file_apply_patch explicitly rejects file creation and deletion", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     expect(() => tools.applyPatch(unified(
       "--- /dev/null",
       "+++ b/new.txt",
@@ -269,7 +272,7 @@ test("file_apply_patch explicitly rejects file creation and deletion", () => {
 });
 
 test("file_apply_patch rejects traversal, symlink escape, and read-only mode", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const inside = join(workspace, "inside.txt");
     writeFileSync(inside, "inside\n", "utf8");
     const insidePatch = unified(
@@ -312,7 +315,7 @@ test("file_apply_patch rejects traversal, symlink escape, and read-only mode", (
 });
 
 test("file_apply_patch rejects a result containing NUL before staging", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "nul-patch.txt");
     writeFileSync(path, "old\n", "utf8");
 
@@ -329,7 +332,7 @@ test("file_apply_patch rejects a result containing NUL before staging", () => {
 });
 
 test("file_apply_patch preserves CRLF and missing-final-newline semantics", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const crlf = join(workspace, "crlf.txt");
     writeFileSync(crlf, "one\r\ntwo\r\n", "utf8");
     tools.applyPatch(unified(
@@ -358,7 +361,7 @@ test("file_apply_patch preserves CRLF and missing-final-newline semantics", () =
 });
 
 test("file_apply_patch enforces exact final-newline markers for every transition", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const cases = [
       { name: "eol-to-eol", initial: "old\n", oldNoNewline: false, newNoNewline: false, expected: "new\n" },
       { name: "no-eol-to-no-eol", initial: "old", oldNoNewline: true, newNoNewline: true, expected: "new" },
@@ -387,7 +390,7 @@ test("file_apply_patch enforces exact final-newline markers for every transition
 });
 
 test("file_apply_patch rejects either direction of stale final-newline context", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const missing = join(workspace, "missing-eol.txt");
     writeFileSync(missing, "old", "utf8");
     expect(() => tools.applyPatch(unified(
@@ -414,7 +417,7 @@ test("file_apply_patch rejects either direction of stale final-newline context",
 });
 
 test("file_edit rejects explosive multi-match expansion before materializing the replacement", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "explosive-edit.txt");
     const original = "a".repeat(1_000);
     const replacement = "z".repeat(5_000_000);
@@ -429,7 +432,7 @@ test("file_edit rejects explosive multi-match expansion before materializing the
 });
 
 test("file_edit keeps replacement-dollar sequences literal without split arrays", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "literal-replacement.txt");
     writeFileSync(path, "a a\n", "utf8");
 
@@ -442,7 +445,7 @@ test("file_edit keeps replacement-dollar sequences literal without split arrays"
 });
 
 test("file_edit prospective byte accounting stays exact for multi-byte Unicode", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "unicode-bytes.txt");
     writeFileSync(path, "é😀|é😀\n", "utf8");
 
@@ -456,7 +459,7 @@ test("file_edit prospective byte accounting stays exact for multi-byte Unicode",
 });
 
 test("file_edit rejects oversized existing and updated files without modifying them", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const oversized = join(workspace, "oversized-existing.txt");
     writeFileSync(oversized, Buffer.alloc(TEXT_MUTATION_FILE_BYTES + 1, 0x61));
     expect(() => tools.edit(
@@ -476,7 +479,7 @@ test("file_edit rejects oversized existing and updated files without modifying t
 });
 
 test("file_apply_patch bounds the aggregate multi-file mutation transaction", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const fileCount = 4;
     const payload = "x".repeat(TEXT_MUTATION_TRANSACTION_BYTES / 8);
     const patch: string[] = [];
@@ -502,7 +505,7 @@ test("file_apply_patch bounds the aggregate multi-file mutation transaction", ()
 });
 
 test("file_apply_patch handles strict pure insertions and deletions at file boundaries", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "boundaries.txt");
     writeFileSync(path, "one\ntwo\n", "utf8");
 
@@ -529,7 +532,7 @@ test("file_apply_patch handles strict pure insertions and deletions at file boun
 });
 
 test("file_apply_patch preserves mixed line endings on untouched and context lines", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "mixed-eol.txt");
     writeFileSync(path, "one\r\ntwo\nthree\r\n", "utf8");
     tools.applyPatch(unified(
@@ -546,14 +549,14 @@ test("file_apply_patch preserves mixed line endings on untouched and context lin
 });
 
 test("file_apply_patch cleans all staging files after a successful rollback", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const first = join(workspace, "first-clean-rollback.txt");
     const second = join(workspace, "second-clean-rollback.txt");
     writeFileSync(first, "first\n", "utf8");
     writeFileSync(second, "second\n", "utf8");
 
-    const originalRename = fs.renameSync;
-    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+    const originalRename = io.renameSync;
+    const renameSpy = spyOn(io, "renameSync").mockImplementation(((oldPath, newPath) => {
       if (String(oldPath).includes(".second-clean-rollback.txt.gwc-updated-")) {
         throw new Error("synthetic second-file commit failure");
       }
@@ -584,15 +587,15 @@ test("file_apply_patch cleans all staging files after a successful rollback", ()
 });
 
 test("file_apply_patch preserves only the useful recovery backup after a concurrent rollback conflict", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const first = join(workspace, "first-race.txt");
     const second = join(workspace, "second-race.txt");
     writeFileSync(first, "first\n", "utf8");
     writeFileSync(second, "second\n", "utf8");
 
-    const originalRename = fs.renameSync;
+    const originalRename = io.renameSync;
     let injectedConcurrentChange = false;
-    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+    const renameSpy = spyOn(io, "renameSync").mockImplementation(((oldPath, newPath) => {
       originalRename(oldPath, newPath);
       if (!injectedConcurrentChange
         && String(newPath) === first
@@ -638,14 +641,14 @@ test("file_apply_patch preserves only the useful recovery backup after a concurr
 });
 
 test("file_apply_patch preserves and reports the rollback backup when restoration itself fails", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const first = join(workspace, "first-rollback-failure.txt");
     const second = join(workspace, "second-rollback-failure.txt");
     writeFileSync(first, "first\n", "utf8");
     writeFileSync(second, "second\n", "utf8");
 
-    const originalRename = fs.renameSync;
-    const renameSpy = spyOn(fs, "renameSync").mockImplementation(((oldPath, newPath) => {
+    const originalRename = io.renameSync;
+    const renameSpy = spyOn(io, "renameSync").mockImplementation(((oldPath, newPath) => {
       const source = String(oldPath);
       if (source.includes(".second-rollback-failure.txt.gwc-updated-")) {
         throw new Error("synthetic second-file commit failure");
@@ -690,7 +693,7 @@ test("file_apply_patch preserves and reports the rollback backup when restoratio
 });
 
 test("file_apply_patch does not strip a literal a/ directory from non-git headers", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     mkdirSync(join(workspace, "a"));
     const path = join(workspace, "a", "nested.txt");
     writeFileSync(path, "old\n", "utf8");
@@ -706,7 +709,7 @@ test("file_apply_patch does not strip a literal a/ directory from non-git header
 });
 
 test("file_apply_patch preserves danger-full-access semantics outside the workspace", () => {
-  withWorkspace((root, workspace, tools) => {
+  withWorkspace((root, workspace, tools, io) => {
     const outside = join(root, "outside.txt");
     writeFileSync(outside, "old\n", "utf8");
     tools.applyPatch(unified(
@@ -721,7 +724,7 @@ test("file_apply_patch preserves danger-full-access semantics outside the worksp
 });
 
 test("file_edit rejects stale exact context after the file was changed externally", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "stale.txt");
     writeFileSync(path, "before expected after\n", "utf8");
     writeFileSync(path, "before current after\n", "utf8");
@@ -731,7 +734,7 @@ test("file_edit rejects stale exact context after the file was changed externall
 });
 
 test("file_apply_patch accepts ordinary git unified-diff metadata without weakening hunk matching", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "git-style.txt");
     writeFileSync(path, "old\n", "utf8");
     tools.applyPatch(unified(
@@ -750,7 +753,7 @@ test("file_apply_patch accepts ordinary git unified-diff metadata without weaken
 
 test("direct text mutations preserve existing POSIX permission bits", () => {
   if (process.platform === "win32") return;
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "mode.txt");
     writeFileSync(path, "before\n", "utf8");
     chmodSync(path, 0o764);
@@ -760,7 +763,7 @@ test("direct text mutations preserve existing POSIX permission bits", () => {
 });
 
 test("file_apply_patch rejects unsupported structural metadata instead of ignoring it", () => {
-  withWorkspace((_root, workspace, tools) => {
+  withWorkspace((_root, workspace, tools, io) => {
     const path = join(workspace, "mode.txt");
     writeFileSync(path, "old\n", "utf8");
     const patch = unified(
