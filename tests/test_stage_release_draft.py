@@ -56,9 +56,22 @@ class DraftReleaseTests(unittest.TestCase):
                 return json.dumps({"tag": TAG,
                                    "object": {"type": "commit",
                                               "sha": self.mode.get("tag_sha", HEAD)}})
-            if "/releases/tags/" in path:
+            if path.endswith("/releases?per_page=100"):
+                release = {"draft": not self.mode.get("published", False),
+                           "tag_name": TAG, "id": 98765}
+                if self.mode.get("no_draft"):
+                    return json.dumps([])
+                if self.mode.get("duplicate_draft"):
+                    return json.dumps([release, dict(release)])
+                if self.mode.get("full_page"):
+                    return json.dumps([release] * 100)
+                return json.dumps([release])
+            if path.endswith("/releases/98765"):
                 return json.dumps({"draft": not self.mode.get("published", False),
-                                   "tag_name": TAG, "id": 98765})
+                                   "tag_name": TAG if not self.mode.get("wrong_draft_id") else "v9.9.9",
+                                   "id": 98765})
+            if "/releases/tags/" in path:
+                raise draft.ReleaseError("GitHub hides drafts from get-by-tag")
             if "/releases/98765/assets" in path:
                 asset = {"name": "example.zip", "size": 39, "state": "uploaded",
                          "digest": "sha256:" + self.digest}
@@ -126,6 +139,20 @@ class DraftReleaseTests(unittest.TestCase):
             with self.assertRaises(draft.ReleaseError):
                 draft.stage(self.directory)
         self.assertEqual(len(self.created), 2)  # One attempt each; no retry.
+
+    def test_draft_by_tag_404_uses_listing_then_checks_immutable_id(self):
+        # The mock deliberately raises on releases/tags/{tag}; the real
+        # first v2.3.0 draft reproduced this 404 with its token.
+        self.assertEqual(draft.stage(self.directory), 98765)
+        self.assertEqual(len(self.created), 1)
+
+    def test_ambiguous_or_mismatched_draft_denied_without_retry(self):
+        for mode in ({"no_draft": True}, {"duplicate_draft": True},
+                     {"full_page": True}, {"wrong_draft_id": True}):
+            self.mode = mode
+            with self.subTest(mode=mode), self.assertRaises(draft.ReleaseError):
+                draft.stage(self.directory)
+        self.assertEqual(len(self.created), 4)  # One create each, never retried.
 
     def test_uncertain_release_create_is_never_retried(self):
         self.mode["creation_failed"] = True

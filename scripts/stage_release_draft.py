@@ -129,13 +129,22 @@ def stage(directory: Path) -> int:
              "--repo", repo, "--draft", "--verify-tag", "--title", tag,
              "--generate-notes", "--latest=false"], timeout=3600)
 
-    # This is best-effort postflight; failure leaves an uncertain DRAFT,
-    # which must be inspected manually, not automatically retried.
-    release = api(f"repos/{repo}/releases/tags/{tag}")
+    # GitHub's releases/tags/{tag} endpoint returns 404 for an unpublished
+    # draft, even to its creator. List drafts and verify the immutable ID.
+    # A full page is ambiguous; refuse rather than miss a later match.
+    releases = api(f"repos/{repo}/releases?per_page=100")
+    require(isinstance(releases, list) and len(releases) < 100,
+            "Incomplete release listing; inspect the draft manually")
+    matches = [r for r in releases if isinstance(r, dict) and r.get("tag_name") == tag]
+    require(len(matches) == 1, "Missing or ambiguous draft; inspect GitHub manually")
+    release = matches[0]
     ident = release.get("id")
-    require(isinstance(release, dict) and release.get("draft") is True
-            and release.get("tag_name") == tag
-            and type(ident) is int and ident > 0, "Incorrect or published release")
+    require(release.get("draft") is True and type(ident) is int and ident > 0,
+            "Incorrect or published release")
+    by_id = api(f"repos/{repo}/releases/{ident}")
+    require(isinstance(by_id, dict) and by_id.get("id") == ident
+            and by_id.get("tag_name") == tag and by_id.get("draft") is True,
+            "Draft ID does not match release listing")
     assets = api(f"repos/{repo}/releases/{ident}/assets?per_page=100")
     require(isinstance(assets, list) and len(assets) == len(files) and len(assets) < 100,
             "Unexpected remote asset inventory")
