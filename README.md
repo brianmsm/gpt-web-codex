@@ -151,6 +151,6 @@ bun run launcher:typecheck
 bun run launcher:test
 ```
 
-Version **v2.3.0** follows standard semantic versioning. See [CHANGELOG.md](CHANGELOG.md) for the fork's changes and validation scope. Before pushing any ref, follow the [privacy-curated release and tag preflight](docs/release-publication.md). The release workflow first stages binary assets as a private **GitHub Release draft**. The maintainer must review its CI results, signatures and checksums before manually publishing. A source version/tag is not evidence that an installer has already been published.
+Version **v2.3.0** follows standard semantic versioning. See [CHANGELOG.md](CHANGELOG.md) for the fork's changes and validation scope. Before pushing any ref, follow the [privacy-curated release and tag preflight](docs/release-publication.md). The single-maintainer workflow first stages binary assets as a **GitHub Release draft**, after checking the exact public tag and build checksums. No self-review approval or independent SHA variable is needed; the maintainer still reviews the assets and CI before manually publishing. A source version/tag is not evidence that an installer has already been published.
 
 Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md). The MIT license and required third-party notices are in [LICENSE](LICENSE) and [LICENSES](LICENSES).

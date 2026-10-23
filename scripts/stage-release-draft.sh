@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Compatibility entrypoint for GitHub Actions. All release mutations and REST
-# validation are performed by the bounded Python client, without using GH CLI.
+# Compatibility entrypoint: GH CLI transport, draft only, no auto-publication.
 set -euo pipefail
-exec python3 -B "$(dirname -- "${BASH_SOURCE[0]}")/stage_release_draft.py" "$@"
+exec python3 -B "$(dirname -- "$0")/stage_release_draft.py" "$@"
